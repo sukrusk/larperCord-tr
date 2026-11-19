@@ -218,6 +218,8 @@ const Compiler = struct {
     a: std.mem.Allocator,
     palette: *const [16]Rgba,
     tokens: *const fn (name: []const u8) ?u8,
+    // cap recursion so deep nesting cant overflow stack (mix(mix(mix(...)
+    depth: u8 = 0,
 
     fn node(p: *Compiler, e: Expr) CompileError!*const Expr {
         const out = try p.a.create(Expr);
@@ -250,6 +252,9 @@ const Compiler = struct {
     }
 
     fn expr(p: *Compiler) CompileError!*const Expr {
+        if (p.depth >= 16) return error.InvalidColor;
+        p.depth += 1;
+        defer p.depth -= 1;
         p.skip();
         const w = p.word();
         if (w.len == 0) return error.InvalidColor;

@@ -303,7 +303,7 @@ fn nextWebp(s: *Stream, w: *c_int, h: *c_int, delay: *c_int) ?[*]const u8 {
     var buf: [*c]u8 = null;
     var ts: c_int = 0;
     if (c.WebPAnimDecoderGetNext(dec, &buf, &ts) == 0 or buf == null) return null;
-    delay.* = ts - s.webp_ts;
+    delay.* = ts -% s.webp_ts;
     s.webp_ts = ts;
     w.* = @intCast(s.webp_w);
     h.* = @intCast(s.webp_h);

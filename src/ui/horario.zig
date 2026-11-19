@@ -1,7 +1,8 @@
 //! O `<t:…>` do Discord em cada idioma, a partir da data já no fuso de quem lê
 //! (o rich.zig converte com o SDL): "9 de novembro de 2026", "November 9, 2026",
-//! "2026年11月9日", "9 ноября 2026 г.", e o relativo: "há 3 dias", "3 days ago",
-//! "3日前", "3 дня назад". Lógica pura, testada em `zig build test`.
+//! "2026年11月9日", "9 ноября 2026 г.", "9 Kasım 2026", e o relativo:
+//! "há 3 dias", "3 days ago", "3日前", "3 дня назад", "3 gün önce".
+//! Lógica pura, testada em `zig build test`.
 const std = @import("std");
 const Lang = @import("i18n.zig").Lang;
 
@@ -11,10 +12,12 @@ const months_pt = [_][]const u8{ "janeiro", "fevereiro", "março", "abril", "mai
 const months_en = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 /// No genitivo, como na data: "9 ноября".
 const months_ru = [_][]const u8{ "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+const months_tr = [_][]const u8{ "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık" };
 const days_pt = [_][]const u8{ "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado" };
 const days_en = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
 const days_ja = [_][]const u8{ "日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日" };
 const days_ru = [_][]const u8{ "воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота" };
+const days_tr = [_][]const u8{ "Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi" };
 
 /// O `<t:…>` em nanossegundos, como o SDL_Time conta: null depois de 2262, que
 /// não cabe num i64 (o Discord aceita até o ano 5138).
@@ -37,7 +40,7 @@ fn writeAbsolute(w: *std.Io.Writer, style: u8, p: Parts, lang: Lang) std.Io.Writ
             .pt => try w.print("{d:0>2}/{d:0>2}/{d}", .{ p.day, p.month, p.year }),
             .en => try w.print("{d:0>2}/{d:0>2}/{d}", .{ p.month, p.day, p.year }),
             .ja => try w.print("{d}/{d:0>2}/{d:0>2}", .{ p.year, p.month, p.day }),
-            .ru => try w.print("{d:0>2}.{d:0>2}.{d}", .{ p.day, p.month, p.year }),
+            .ru, .tr => try w.print("{d:0>2}.{d:0>2}.{d}", .{ p.day, p.month, p.year }),
         },
         'D' => try writeDate(w, p, lang),
         'F' => {
@@ -46,6 +49,10 @@ fn writeAbsolute(w: *std.Io.Writer, style: u8, p: Parts, lang: Lang) std.Io.Writ
                 .ja => {
                     try writeDate(w, p, lang);
                     try w.writeAll(days_ja[wd]);
+                },
+                .tr => {
+                    try writeDate(w, p, lang);
+                    try w.print(", {s}", .{days_tr[wd]});
                 },
                 .pt, .en, .ru => {
                     try w.print("{s}, ", .{(switch (lang) {
@@ -72,19 +79,20 @@ fn writeDate(w: *std.Io.Writer, p: Parts, lang: Lang) std.Io.Writer.Error!void {
         .en => try w.print("{s} {d}, {d}", .{ months_en[m], p.day, p.year }),
         .ja => try w.print("{d}年{d}月{d}日", .{ p.year, p.month, p.day }),
         .ru => try w.print("{d} {s} {d} г.", .{ p.day, months_ru[m], p.year }),
+        .tr => try w.print("{d} {s} {d}", .{ p.day, months_tr[m], p.year }),
     }
 }
 
 /// Russo: "минуту" e "секунду" no acusativo, como vão depois de "через" e antes
 /// de "назад" (os masculinos não mudam).
-const Unit = struct { size: u64, pt: [2][]const u8, en: [2][]const u8, ja: []const u8, ru: [3][]const u8 };
+const Unit = struct { size: u64, pt: [2][]const u8, en: [2][]const u8, ja: []const u8, ru: [3][]const u8, tr: []const u8 };
 const units = [_]Unit{
-    .{ .size = 365 * 86400, .pt = .{ "ano", "anos" }, .en = .{ "year", "years" }, .ja = "年", .ru = .{ "год", "года", "лет" } },
-    .{ .size = 30 * 86400, .pt = .{ "mês", "meses" }, .en = .{ "month", "months" }, .ja = "ヶ月", .ru = .{ "месяц", "месяца", "месяцев" } },
-    .{ .size = 86400, .pt = .{ "dia", "dias" }, .en = .{ "day", "days" }, .ja = "日", .ru = .{ "день", "дня", "дней" } },
-    .{ .size = 3600, .pt = .{ "hora", "horas" }, .en = .{ "hour", "hours" }, .ja = "時間", .ru = .{ "час", "часа", "часов" } },
-    .{ .size = 60, .pt = .{ "minuto", "minutos" }, .en = .{ "minute", "minutes" }, .ja = "分", .ru = .{ "минуту", "минуты", "минут" } },
-    .{ .size = 1, .pt = .{ "segundo", "segundos" }, .en = .{ "second", "seconds" }, .ja = "秒", .ru = .{ "секунду", "секунды", "секунд" } },
+    .{ .size = 365 * 86400, .pt = .{ "ano", "anos" }, .en = .{ "year", "years" }, .ja = "年", .ru = .{ "год", "года", "лет" }, .tr = "yıl" },
+    .{ .size = 30 * 86400, .pt = .{ "mês", "meses" }, .en = .{ "month", "months" }, .ja = "ヶ月", .ru = .{ "месяц", "месяца", "месяцев" }, .tr = "ay" },
+    .{ .size = 86400, .pt = .{ "dia", "dias" }, .en = .{ "day", "days" }, .ja = "日", .ru = .{ "день", "дня", "дней" }, .tr = "gün" },
+    .{ .size = 3600, .pt = .{ "hora", "horas" }, .en = .{ "hour", "hours" }, .ja = "時間", .ru = .{ "час", "часа", "часов" }, .tr = "saat" },
+    .{ .size = 60, .pt = .{ "minuto", "minutos" }, .en = .{ "minute", "minutes" }, .ja = "分", .ru = .{ "минуту", "минуты", "минут" }, .tr = "dakika" },
+    .{ .size = 1, .pt = .{ "segundo", "segundos" }, .en = .{ "second", "seconds" }, .ja = "秒", .ru = .{ "секунду", "секунды", "секунд" }, .tr = "saniye" },
 };
 
 /// A forma do plural russo: 0 para 1, 21, 101…; 1 para 2–4, 22–24…; 2 para o
@@ -113,6 +121,7 @@ pub fn relative(buf: []u8, delta: i64, lang: Lang) []const u8 {
         // Japonês não distingue singular e plural.
         .ja => if (past) f(buf, "{d}{s}前", .{ n, u.ja }) else f(buf, "{d}{s}後", .{ n, u.ja }),
         .ru => if (past) f(buf, "{d} {s} назад", .{ n, u.ru[ruForm(n)] }) else f(buf, "через {d} {s}", .{ n, u.ru[ruForm(n)] }),
+        .tr => if (past) f(buf, "{d} {s} önce", .{ n, u.tr }) else f(buf, "{d} {s} sonra", .{ n, u.tr }),
     };
     return out catch "?";
 }
@@ -182,6 +191,12 @@ test "data e hora do <t:…> em cada idioma" {
     try t.expectEqualStrings("Monday, November 9, 2026 03:39", absolute(&buf, 'F', p, .en));
     try t.expectEqualStrings("2026年11月9日月曜日 03:39", absolute(&buf, 'F', p, .ja));
     try t.expectEqualStrings("понедельник, 9 ноября 2026 г. 03:39", absolute(&buf, 'F', p, .ru));
+    try t.expectEqualStrings("09.11.2026", absolute(&buf, 'd', p, .tr));
+    try t.expectEqualStrings("9 Kasım 2026", absolute(&buf, 'D', p, .tr));
+    try t.expectEqualStrings("9 Kasım 2026 03:39", absolute(&buf, 'f', p, .tr));
+    try t.expectEqualStrings("9 Kasım 2026, Pazartesi 03:39", absolute(&buf, 'F', p, .tr));
+    try t.expectEqualStrings("3 gün önce", relative(&buf, -3 * 86400, .tr));
+    try t.expectEqualStrings("2 saat sonra", relative(&buf, 2 * 3600, .tr));
     // Sem espaço: "?", como antes.
     var tiny: [4]u8 = undefined;
     try t.expectEqualStrings("?", absolute(&tiny, 'D', p, .pt));

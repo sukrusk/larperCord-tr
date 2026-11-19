@@ -443,7 +443,7 @@ def collect(files):
 
 
 THEMES = ROOT / "themes"
-THEME_EN = re.compile(r'\b(?:description|label)-en="((?:[^"\\]|\\.)*)"')
+THEME_EN = re.compile(r'\b(?:description|label|text)-en="((?:[^"\\]|\\.)*)"')
 
 
 def theme_uses():

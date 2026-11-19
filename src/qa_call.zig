@@ -18,6 +18,7 @@ const types = @import("core/types.zig");
 const platform = @import("platform/window.zig");
 const Rect = @import("theme/layout.zig").Rect;
 const call_grid = @import("ui/call_grid.zig");
+const live_video = @import("ui/live_video.zig");
 const Id = types.Id;
 
 fn s(name: []const u8) Op {
@@ -205,6 +206,71 @@ fn leaveFresh(app: *App) void {
 }
 fn backInDm(app: *App) bool {
     return app.st.voice == null and !app.st.call_view and app.st.activeChannel() == dm0 and app.st.guild == 0;
+}
+
+fn joinCall0Video(app: *App) void {
+    app.handle(.{ .select_guild = g0 });
+    app.handle(.{ .toggle_voice = call0 });
+    app.handle(.{ .show_call = call0 });
+}
+fn videoIdleZeroRam(app: *App) bool {
+    return app.st.voice == call0 and !app.st.cam_on and app.st.watch_owner == 0 and live_video.eng.totalCpuRamBytes() == 0;
+}
+fn toggleCamAction(app: *App) void {
+    app.handle(.toggle_camera);
+}
+fn camActiveOk(app: *App) bool {
+    return app.st.cam_on and live_video.eng.cameraActive() and live_video.eng.cam_slot.ramBytes() > 0;
+}
+fn camStoppedZero(app: *App) bool {
+    return !app.st.cam_on and live_video.eng.cam_slot.ramBytes() == 0;
+}
+fn watch4kAction(app: *App) void {
+    app.handle(.{ .watch_stream = kaique });
+}
+fn watch4kActiveOk(app: *App) bool {
+    if (app.st.watch_owner != kaique or qa.find("stream-stage:1003") == null) return false;
+    const v = live_video.eng.watch_slot.view(app.win.renderer) orelse return false;
+    return v.w == 3840 and v.h == 2160 and live_video.eng.watch_slot.ramBytes() == 3840 * 2160 * 3 / 2;
+}
+fn reqRemoteAction(app: *App) void {
+    app.handle(.{ .request_remote_ctrl = .{ .peer = kaique, .perm = .full } });
+    push(app, .{ .remote_ctrl_state = .{ .peer = kaique, .status = .active_viewer, .perm = .full } });
+}
+fn remoteViewerActive(app: *App) bool {
+    return app.st.remote_ctrl_status == .active_viewer and app.st.remote_ctrl_perm == .full;
+}
+fn remoteStoppedIdle(app: *App) bool {
+    return app.st.remote_ctrl_status == .idle and app.st.remote_ctrl_perm == .off and app.st.remote_ctrl_req == null;
+}
+fn incomingConsentAction(app: *App) void {
+    app.st.settings.remote_ctrl_allow = 1;
+    push(app, .{ .remote_ctrl_request = .{ .peer = kaique, .perm = .full } });
+}
+fn consentBannerShown(app: *App) bool {
+    return app.st.remote_ctrl_req != null and qa.find("remote-consent") != null and qa.find("remote-consent-full") != null and qa.find("remote-consent-mouse") != null;
+}
+fn remoteHostActive(app: *App) bool {
+    return app.st.remote_ctrl_status == .active_host and app.st.remote_ctrl_perm == .mouse_only and qa.find("remote-kill-pill") != null;
+}
+fn dmConsentSpotlight(app: *App) void {
+    app.st.spotlight_fullscreen = true;
+    incomingConsentAction(app);
+}
+fn remoteHostFull(app: *App) bool {
+    return app.st.remote_ctrl_status == .active_host and app.st.remote_ctrl_perm == .full and app.st.remote_ctrl_req == null and qa.find("remote-kill-pill") != null;
+}
+fn leaveAndVerifyZeroRam(app: *App) bool {
+    return app.st.voice == null and live_video.eng.totalCpuRamBytes() == 0;
+}
+fn dmModalOpen(app: *App) bool {
+    return !app.st.call_view and app.st.watch_owner == kaique and !app.st.spotlight_fullscreen and qa.find("stream-fullscreen") != null and qa.find("stream-close") != null;
+}
+fn dmSpotlightFull(app: *App) bool {
+    return !app.st.call_view and app.st.watch_owner == kaique and app.st.spotlight_fullscreen and qa.find("stream-close") != null;
+}
+fn dmSpotlightClosed(app: *App) bool {
+    return app.st.watch_owner == 0 and !app.st.spotlight_fullscreen and qa.find("stream-close") == null;
 }
 
 const g1: Id = gw.guildId(1);
@@ -473,6 +539,26 @@ pub const ops = [_]Op{
     click("call-start"),
     expect("na call da DM, a grade numa faixa em cima da conversa", dmBand),
     shot("call-dm"),
+    run(watch4kAction),
+    .{ .wait = 150 },
+    expect("DM spotlight abre como modal", dmModalOpen),
+    click("stream-fullscreen"),
+    expect("DM spotlight amplia para tela cheia", dmSpotlightFull),
+    click("stream-fullscreen"),
+    expect("DM spotlight reduz ao clicar de novo em tela cheia", dmModalOpen),
+    click("stream-fullscreen"),
+    expect("DM spotlight amplia novamente", dmSpotlightFull),
+    run(dmConsentSpotlight),
+    .{ .wait = 50 },
+    expect("banner de consentimento aparece sobre DM fullscreen", consentBannerShown),
+    click("remote-consent-full"),
+    .{ .wait = 50 },
+    expect("clique real aceita controle remoto total sobre DM fullscreen", remoteHostFull),
+    key(c.ImGuiKey_F8),
+    .{ .wait = 50 },
+    expect("kill switch F8 encerra controle após clique no DM fullscreen", remoteStoppedIdle),
+    click("stream-close"),
+    expect("DM spotlight ampliado fecha ao clicar no X", dmSpotlightClosed),
     click("grid-leave"),
     expect("sair pela faixa", dmLeft),
 
@@ -481,6 +567,38 @@ pub const ops = [_]Op{
     expect("a tela da call de um servidor nunca aberto traz a lista de membros dele", freshMembers),
     run(leaveFresh),
     expect("sair volta para a DM", backInDm),
+
+    s("vídeo 4K, câmera, AnyDesk e RAM zero ao sair"),
+    run(joinCall0Video),
+    .{ .wait = 100 },
+    expect("0 bytes de vídeo em repouso antes de ligar câmera/live", videoIdleZeroRam),
+    run(toggleCamAction),
+    .{ .wait = 200 },
+    expect("câmera ativa com buffer NV12 alocado sob demanda", camActiveOk),
+    run(toggleCamAction),
+    .{ .wait = 50 },
+    expect("desligar câmera libera RAM imediatamente", camStoppedZero),
+    run(watch4kAction),
+    .{ .wait = 250 },
+    expect("Go Live 4K (3840x2160 NV12) renderiza em slot único (~11.87 MiB)", watch4kActiveOk),
+    run(reqRemoteAction),
+    .{ .wait = 50 },
+    expect("sessão AnyDesk espectador ativa", remoteViewerActive),
+    key(c.ImGuiKey_F8),
+    .{ .wait = 50 },
+    expect("kill switch F8 encerra controle espectador imediatamente", remoteStoppedIdle),
+    run(incomingConsentAction),
+    .{ .wait = 50 },
+    expect("banner de consentimento explícito do host aparece", consentBannerShown),
+    click("remote-consent-mouse"),
+    .{ .wait = 50 },
+    expect("host aprova só mouse e exibe pill F8", remoteHostActive),
+    key(c.ImGuiKey_F8),
+    .{ .wait = 50 },
+    expect("kill switch F8 encerra sessão no host", remoteStoppedIdle),
+    run(leaveFresh),
+    .{ .wait = 100 },
+    expect("ao sair da call toda RAM de vídeo volta a 0 bytes", leaveAndVerifyZeroRam),
 };
 
 // --- Cada tema -----------------------------------------------------------------------
@@ -560,6 +678,9 @@ pub const ops_theme = [_]Op{
     run(lang(.ru)),
     .{ .wait = 100 },
     expect("em russo também", statusFits),
+    run(lang(.tr)),
+    .{ .wait = 100 },
+    expect("em turco também", statusFits),
     run(lang(.pt)),
     .{ .wait = 100 },
     expect("\"Voz conectada\" também", statusFits),

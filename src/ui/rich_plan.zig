@@ -172,8 +172,8 @@ pub const Plan = struct {
         var first = true;
         for (from..to) |k| {
             const pc = &p.pc[k];
-            if (pc.fixed) continue;
             if (pc.text.len > std.math.maxInt(u16)) return false;
+            if (pc.fixed) continue;
             if (!first and pc.space) {
                 if (len == bidi.max_line) return false;
                 cps[len] = ' ';

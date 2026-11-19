@@ -14,6 +14,7 @@ const types = @import("../core/types.zig");
 const i18n = @import("i18n.zig");
 const moderacao = @import("moderacao.zig");
 const devices = @import("device_menu.zig");
+const icons = @import("icons.zig");
 
 pub fn memberList(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
     if (ctx.st.friends) return @import("comp_friends.zig").activeNow(ctx, n, r);
@@ -275,9 +276,9 @@ fn memberClick(ctx: *d.Ctx, hb: d.Hit, uid: types.Id, rr: d.Rect) void {
 
 // --- Barra de status --------------------------------------------------------
 
-/// `me`, `mic` e `deaf`: o próprio status e os botões de mudo e ensurdecer (com
+/// `me`, `mic`, `deaf`, `cam` e `share`: o próprio status e botões de mídia (com
 /// o menu de dispositivos), para temas sem painel do usuário (zen).
-const Item = enum { conn, ping, ram, frame, voice, theme, keys, clock, me, mic, deaf, spacer };
+const Item = enum { conn, ping, ram, frame, voice, cam, share, theme, keys, clock, me, mic, deaf, spacer };
 
 fn statusLabel(st: types.Status) []const u8 {
     return switch (st) {
@@ -341,6 +342,16 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 color = ctx.col(.online);
                 break :blk std.fmt.bufPrint(b, "🔊 {s}{s}", .{ cs.info.name, if (ctx.st.muted) i18n.tr(" (mudo)", " (muted)") else "" }) catch "";
             },
+            .cam => blk: {
+                if (ctx.st.voice == null) continue;
+                color = if (ctx.st.cam_on) ctx.col(.online) else ctx.col(.muted);
+                break :blk if (tty) i18n.tr("[cam]", "[cam]") else "";
+            },
+            .share => blk: {
+                if (ctx.st.voice == null) continue;
+                color = if (ctx.st.stream_on) ctx.col(.accent) else ctx.col(.muted);
+                break :blk if (tty) i18n.tr("[tela]", "[share]") else "";
+            },
             .theme => std.fmt.bufPrint(b, "◆ {s}", .{ctx.theme_name}) catch "",
             .keys => blk: {
                 const tk = @import("teclas.zig");
@@ -364,6 +375,7 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
         const font = segFont(fam, item);
         const tw: f32 = switch (item) {
             .mic, .deaf => if (tty) devices.ttyWidth(font, fs, if (item == .mic) .mic else .deaf, .tty) else 30,
+            .cam, .share => if (tty) d.width(font, fs, text) else 26,
             .me => d.width(font, fs, text) + (if (tty) @as(f32, 0) else 13),
             else => d.width(font, fs, text),
         };
@@ -420,6 +432,36 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), if (pills) sr.h / 2 else 0);
                 d.tip(ctx, sr, i18n.tr("Mixer da call · botão direito: dispositivos", "Call mixer · right-click: devices"), hb.hovered);
             },
+            .cam => {
+                const hb = d.hit(ctx, 0x600 + i, sr);
+                qa.mark(sr, "status-cam", .{});
+                const on = ctx.st.cam_on;
+                if (hb.clicked) ctx.act(.toggle_camera);
+                d.tip(ctx, sr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), hb.hovered);
+                if (tty) {
+                    if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);
+                } else {
+                    const br: d.Rect = .{ .x = sr.x + sp, .y = sr.y + @max((sr.h - 24) / 2, 0), .w = s.w, .h = @min(sr.h, 24) };
+                    if (on) d.rect(dl, br, ctx.col(.online).alpha(0.22), 6) else if (hb.hovered) d.rect(dl, br, ctx.col(.hover), 6);
+                    icons.camera(dl, br.x + br.w / 2, br.y + br.h / 2, (if (on) ctx.col(.online) else ctx.col(.text).alpha(0.85)).u(), !on);
+                    continue;
+                }
+            },
+            .share => {
+                const hb = d.hit(ctx, 0x700 + i, sr);
+                qa.mark(sr, "status-share", .{});
+                const on = ctx.st.stream_on;
+                if (hb.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
+                d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), hb.hovered);
+                if (tty) {
+                    if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);
+                } else {
+                    const br: d.Rect = .{ .x = sr.x + sp, .y = sr.y + @max((sr.h - 24) / 2, 0), .w = s.w, .h = @min(sr.h, 24) };
+                    if (on) d.rect(dl, br, ctx.col(.accent).alpha(0.22), 6) else if (hb.hovered) d.rect(dl, br, ctx.col(.hover), 6);
+                    icons.screen(dl, br.x + br.w / 2, br.y + br.h / 2, (if (on) ctx.col(.accent) else ctx.col(.text).alpha(0.85)).u());
+                    continue;
+                }
+            },
             else => {},
         }
         if (tty) {
@@ -447,7 +489,7 @@ fn segFont(fam: *d.Family, item: Item) *c.ImFont {
 /// Folga de cada lado do segmento: os botões desenham a própria área de clique.
 fn segPad(item: Item, pad: f32, tty: bool) f32 {
     return switch (item) {
-        .mic, .deaf => if (tty) 6 else 1,
+        .mic, .deaf, .cam, .share => if (tty) 6 else 1,
         else => pad,
     };
 }

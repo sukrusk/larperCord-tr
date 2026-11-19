@@ -168,6 +168,7 @@ pub fn build(b: *std.Build) void {
     // Traduções além do português e do inglês: um arquivo por idioma (src/ui/i18n.zig).
     mod.addAnonymousImport("i18n_ja", .{ .root_source_file = b.path("i18n/ja.kdl") });
     mod.addAnonymousImport("i18n_ru", .{ .root_source_file = b.path("i18n/ru.kdl") });
+    mod.addAnonymousImport("i18n_tr", .{ .root_source_file = b.path("i18n/tr.kdl") });
     mod.addImport("c", translate.createModule());
     mod.addImport("builtin_themes", builtin_themes);
     mod.addImport("plugin_examples", plugin_examples);
@@ -347,6 +348,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addAnonymousImport("changelog_pt", .{ .root_source_file = b.path("CHANGELOG.pt-BR.md") });
     test_mod.addAnonymousImport("i18n_ja", .{ .root_source_file = b.path("i18n/ja.kdl") });
     test_mod.addAnonymousImport("i18n_ru", .{ .root_source_file = b.path("i18n/ru.kdl") });
+    test_mod.addAnonymousImport("i18n_tr", .{ .root_source_file = b.path("i18n/tr.kdl") });
     addLua(b, test_mod);
     addRnnoise(b, test_mod);
     addFribidi(b, test_mod);

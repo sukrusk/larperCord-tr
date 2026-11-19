@@ -162,7 +162,6 @@ const Pixels = struct {
 const PixFrame = struct { data: []u8, delay_ms: u32 };
 const tintOf = @import("tint.zig").tintOf;
 
-
 const Result = struct {
     key: []u8,
     px: Pixels = .{},
@@ -1184,7 +1183,8 @@ fn decodeWebp(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(
         var ts: c_int = 0;
         if (c.WebPAnimDecoderGetNext(dec, &buf, &ts) == 0 or buf == null) break;
         defer last = ts;
-        if (!sink.add(buf[0 .. cw * ch * 4], cw, ch, gifDelay(ts - last))) break;
+        // ts is a running total in a C int; wraps on long anim -% keeps the gap valid
+        if (!sink.add(buf[0 .. cw * ch * 4], cw, ch, gifDelay(ts -% last))) break;
     }
     return if (sink.streaming) sink.seedFrom(data) else sink.finish();
 }

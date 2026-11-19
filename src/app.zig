@@ -75,7 +75,49 @@ const bandeja = @import("core/bandeja.zig");
 const ritmo = @import("core/ritmo.zig");
 const quadro = @import("ui/quadro.zig");
 const send_limits = @import("ui/composer_limits.zig");
+const live_video = @import("ui/live_video.zig");
+const video_cfg = @import("core/video_cfg.zig");
+const voice_mod = @import("net/voice.zig");
+const remote_ctrl = @import("net/remote_ctrl.zig");
+const stream_view = @import("ui/stream_view.zig");
 const Debounce = @import("core/debounce.zig").Debounce;
+
+fn onVoiceRemoteVideo(_: ?*anyopaque, peer: types.Id, is_stream: bool, w: u16, h: u16, y: []const u8, yp: usize, uv: []const u8, uvp: usize, codec: video_cfg.Codec, pts_ms: i64) void {
+    live_video.eng.onRemoteVideoFrame(peer, is_stream, w, h, y, yp, uv, uvp, codec, pts_ms);
+}
+fn onVoiceRemoteClear(_: ?*anyopaque, peer: types.Id, is_stream: bool) void {
+    live_video.eng.clearRemoteVideo(peer, is_stream);
+}
+fn onP2pRemoteVideo(_: ?*anyopaque, w: u16, h: u16, y: []const u8, yp: usize, uv: []const u8, uvp: usize, codec: video_cfg.Codec, pts_ms: i64) void {
+    live_video.eng.onRemoteVideoFrame(0, true, w, h, y, yp, uv, uvp, codec, pts_ms);
+}
+fn onCamEncodedAu(_: ?*anyopaque, codec: video_cfg.Codec, pts_us: i64, is_keyframe: bool, au: []const u8) void {
+    voice_mod.media_bridge.submitAu(false, codec, pts_us, is_keyframe, au);
+}
+fn onCamKeyReq(_: ?*anyopaque) bool {
+    return voice_mod.media_bridge.consumeKeyReq(false);
+}
+fn onStreamEncodedAu(_: ?*anyopaque, codec: video_cfg.Codec, pts_us: i64, is_keyframe: bool, au: []const u8) void {
+    if (remote_ctrl.mgr.activeHost()) {
+        remote_ctrl.mgr.sendVideoAu(codec, pts_us, is_keyframe, au);
+    }
+    voice_mod.media_bridge.submitAu(true, codec, pts_us, is_keyframe, au);
+}
+fn onStreamKeyReq(_: ?*anyopaque) bool {
+    return voice_mod.media_bridge.consumeKeyReq(true) or remote_ctrl.mgr.consumeKeyReq();
+}
+fn hasCamTarget() bool {
+    return voice_mod.media_bridge.hasTarget(false);
+}
+fn hasStreamTarget() bool {
+    return voice_mod.media_bridge.hasTarget(true) or remote_ctrl.mgr.activeHost();
+}
+fn streamTargetBitrateKbps() u32 {
+    return voice_mod.media_bridge.targetBitrateKbps(true);
+}
+fn onStreamLoopbackAudio(_: ?*anyopaque, pcm_f32: []const f32) void {
+    voice_mod.media_bridge.submitAudio(pcm_f32);
+}
 
 /// Op 14 do canal aberto: o canal escolhido depois de uma pausa pede na hora;
 /// trocas seguidas (Ctrl+Tab, cliques em sequência) esperam a escolha parar.
@@ -224,6 +266,7 @@ pub const App = struct {
     /// O tique do relógio acordou só porque o minuto virou (sem RAM nova para
     /// mostrar): se um quadro já saiu neste minuto, não precisa de outro.
     minute_tick: std.atomic.Value(bool) = .init(false),
+    auto_rc_capture: bool = false,
     /// Guardar o token quando o Discord aceitar (o "Lembrar" do login).
     save_token: bool = false,
     /// O proxy do Discord da última vez que o quadro olhou (net/proxy.zig `generation`).
@@ -304,6 +347,14 @@ pub const App = struct {
 
         app.store.on_evict = msg_cache.onEvict;
         app.store.muted = &app.st.muted_channels;
+        voice_mod.media_bridge.setRemoteSink(null, onVoiceRemoteVideo);
+        voice_mod.media_bridge.setRemoteClearSink(onVoiceRemoteClear);
+        remote_ctrl.mgr.setRemoteVideoSink(null, onP2pRemoteVideo);
+        live_video.eng.setWakeFn(&lspWake);
+        live_video.eng.setCameraTxSink(null, onCamEncodedAu, onCamKeyReq);
+        live_video.eng.setStreamTxSink(null, onStreamEncodedAu, onStreamKeyReq, onStreamLoopbackAudio);
+        live_video.eng.setTxTargetProbe(hasCamTarget, hasStreamTarget);
+        live_video.stream_target_bitrate_fn = streamTargetBitrateKbps;
         // Cache de mensagens e contas: o QA e os prints nunca usam os de verdade.
         msg_cache.init(opts.qa);
         msg_cache.off = opts.shot != null;
@@ -627,6 +678,10 @@ pub const App = struct {
         app.clearUploads();
         app.picked.deinit();
         @import("ui/video.zig").shutdown();
+        stream_view.resetRemoteInput();
+        remote_ctrl.mgr.deinit();
+        voice_mod.media_bridge.setRemoteSink(null, null);
+        @import("ui/live_video.zig").eng.deinit();
         @import("ui/voice_msg.zig").shutdown();
         // (Por último, lá dentro: as threads de mídia e de vídeo usam o libcurl.)
         app.images.deinit();
@@ -853,6 +908,14 @@ pub const App = struct {
         app.store = Store.init(app.gpa);
         app.store.on_evict = msg_cache.onEvict;
         app.store.muted = &app.st.muted_channels;
+        voice_mod.media_bridge.setRemoteSink(null, onVoiceRemoteVideo);
+        voice_mod.media_bridge.setRemoteClearSink(onVoiceRemoteClear);
+        remote_ctrl.mgr.setRemoteVideoSink(null, onP2pRemoteVideo);
+        live_video.eng.setWakeFn(&lspWake);
+        live_video.eng.setCameraTxSink(null, onCamEncodedAu, onCamKeyReq);
+        live_video.eng.setStreamTxSink(null, onStreamEncodedAu, onStreamKeyReq, onStreamLoopbackAudio);
+        live_video.eng.setTxTargetProbe(hasCamTarget, hasStreamTarget);
+        live_video.stream_target_bitrate_fn = streamTargetBitrateKbps;
         app.viewing = 0;
         const st = &app.st;
         st.muted_channels.clearRetainingCapacity();
@@ -1094,6 +1157,18 @@ pub const App = struct {
             app.st.friends = app.st.call_prev_friends;
         }
         app.st.call_view = false;
+        app.st.cam_on = false;
+        app.st.stream_on = false;
+        app.st.watch_owner = 0;
+        app.st.spotlight_fullscreen = false;
+        app.st.remote_ctrl_peer = 0;
+        app.st.remote_ctrl_status = .idle;
+        app.st.remote_ctrl_perm = .off;
+        app.st.remote_ctrl_req = null;
+        stream_view.resetRemoteInput();
+        remote_ctrl.mgr.stop();
+        live_video.eng.stopAll();
+        app.trim_wanted.store(true, .release);
         app.st.voice_ping_ms = 0;
         app.st.voice_mic_failed = false;
         app.st.voice_out_failed = false;
@@ -2127,6 +2202,146 @@ pub const App = struct {
             .start_call => |ch| app_chamada.start(app, ch),
             .accept_call => app_chamada.accept(app),
             .decline_call => app_chamada.decline(app),
+            .toggle_camera => {
+                if (st.voice == null) return;
+                if (st.cam_on) {
+                    st.cam_on = false;
+                    live_video.eng.stopCamera();
+                    app.cmd(.stop_video);
+                } else {
+                    const res = video_cfg.Resolution.fromByte(st.settings.video_res);
+                    const fps: u8 = if (st.settings.video_fps == 1) 60 else 30;
+                    const ok = live_video.eng.startCamera(st.settings.video_cam_idx, res, fps, app.store.demo);
+                    if (ok) {
+                        st.cam_on = true;
+                        app.cmd(.{ .start_video = .{
+                            .kind = .camera,
+                            .resolution = if (live_video.eng.cam_synthetic) res else live_video.eng.cam_res,
+                            .fps = live_video.eng.cam_fps,
+                            .codec = video_cfg.Codec.fromByte(st.settings.video_codec),
+                            .hw_accel = st.settings.video_hw,
+                        } });
+                    } else {
+                        st.showToast(now(), true, "nenhuma câmera aberta (verifique a permissão)", "no camera opened (check permission)", .{});
+                    }
+                }
+            },
+            .open_stream_picker => {
+                if (st.voice == null) return;
+                st.popup = .stream_picker;
+            },
+            .start_screen_share => |cfg| {
+                const ch = st.voice orelse return;
+                st.stream_on = true;
+                st.stream_cfg = cfg;
+                app.cmd(.{ .start_stream = cfg });
+                if (!app.opts.qa and (cfg.kind == .screen or cfg.kind == .window)) {
+                    if (live_video.eng.startNativeCapture(cfg)) {
+                        st.watch_owner = app.store.me;
+                    }
+                } else if (app.store.demo or cfg.kind == .demo_4k) {
+                    st.watch_owner = app.store.me;
+                    live_video.eng.startDemoWatch(cfg);
+                    app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = app.store.me, .watch = true } });
+                }
+            },
+            .stop_screen_share => {
+                st.stream_on = false;
+                if (st.watch_owner == app.store.me) {
+                    st.watch_owner = 0;
+                    st.spotlight_fullscreen = false;
+                    live_video.eng.stopWatch();
+                }
+                app.cmd(.stop_stream);
+            },
+            .watch_stream => |owner| {
+                const ch = st.voice orelse return;
+                const old_owner = st.watch_owner;
+                if (owner == 0 or owner == old_owner) {
+                    st.watch_owner = 0;
+                    st.spotlight_fullscreen = false;
+                    live_video.eng.preview_wanted.store(false, .release);
+                    // Closing self-preview hides the stage without killing an active Go Live capture.
+                    if (old_owner == app.store.me and st.stream_on) return;
+                    if (old_owner != 0) app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = old_owner, .watch = false } });
+                    if (!st.stream_on or app.store.demo) live_video.eng.stopWatch() else live_video.eng.watch_slot.clear();
+                    if (st.remote_ctrl_status == .active_viewer or st.remote_ctrl_status == .pending_out) {
+                        if (st.remote_ctrl_peer != 0) app.cmd(.{ .remote_ctrl_stop = st.remote_ctrl_peer });
+                        stream_view.resetRemoteInput();
+                        remote_ctrl.mgr.stop();
+                        st.remote_ctrl_peer = 0;
+                        st.remote_ctrl_status = .idle;
+                        st.remote_ctrl_perm = .off;
+                    }
+                } else {
+                    if (old_owner != 0 and old_owner != app.store.me) {
+                        app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = old_owner, .watch = false } });
+                    }
+                    st.watch_owner = owner;
+                    live_video.eng.preview_wanted.store(owner == app.store.me, .release);
+                    live_video.eng.watch_slot.clear();
+                    if (owner == app.store.me and st.stream_on and !app.store.demo) return;
+                    const si = app.store.streamOf(owner);
+                    const res: video_cfg.Resolution = if (si) |s| blk: {
+                        if (s.width >= 3840) break :blk .p2160;
+                        if (s.width >= 2560) break :blk .p1440;
+                        if (s.width >= 1920) break :blk .p1080;
+                        break :blk .p720;
+                    } else video_cfg.Resolution.fromByte(st.settings.video_res);
+                    const cfg: video_cfg.StreamConfig = .{
+                        .kind = if (si) |s| s.source else if (app.store.demo) .demo_4k else .screen,
+                        .resolution = res,
+                        .fps = if (si) |s| s.fps else 60,
+                        .codec = if (si) |s| s.codec else .h264,
+                        .hw_accel = st.settings.video_hw,
+                    };
+                    if (app.store.demo or cfg.kind == .demo_4k) {
+                        live_video.eng.startDemoWatch(cfg);
+                    }
+                    app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = owner, .watch = true } });
+                }
+            },
+            .request_remote_ctrl => |rc| {
+                st.remote_ctrl_peer = rc.peer;
+                st.remote_ctrl_status = .pending_out;
+                app.cmd(.{ .remote_ctrl_request = .{ .peer = rc.peer, .perm = rc.perm } });
+            },
+            .respond_remote_ctrl => |rr| {
+                st.remote_ctrl_req = null;
+                if (rr.perm == .off) {
+                    remote_ctrl.mgr.stop();
+                    st.remote_ctrl_peer = 0;
+                    st.remote_ctrl_status = .idle;
+                    st.remote_ctrl_perm = .off;
+                } else {
+                    st.remote_ctrl_peer = rr.peer;
+                    st.remote_ctrl_status = .active_host;
+                    st.remote_ctrl_perm = rr.perm;
+                    remote_ctrl.mgr.setPermission(rr.perm);
+                }
+                app.cmd(.{ .remote_ctrl_respond = .{ .peer = rr.peer, .perm = rr.perm } });
+            },
+            .stop_remote_ctrl => {
+                if (st.remote_ctrl_peer != 0) app.cmd(.{ .remote_ctrl_stop = st.remote_ctrl_peer });
+                stream_view.resetRemoteInput();
+                remote_ctrl.mgr.stop();
+                if (app.auto_rc_capture) {
+                    app.auto_rc_capture = false;
+                    if (!st.stream_on) live_video.eng.stopWatch();
+                }
+                if (st.watch_owner == st.remote_ctrl_peer and !st.stream_on and st.remote_ctrl_peer != app.store.me) {
+                    const si = app.store.streamOf(st.remote_ctrl_peer);
+                    if (si == null) {
+                        st.watch_owner = 0;
+                        st.spotlight_fullscreen = false;
+                        live_video.eng.stopWatch();
+                    }
+                }
+                st.remote_ctrl_req = null;
+                st.remote_ctrl_peer = 0;
+                st.remote_ctrl_status = .idle;
+                st.remote_ctrl_perm = .off;
+            },
             .set_voice_volume => |vv| {
                 // Silenciada para nós, continua sem som: só o volume guardado muda.
                 st.volumes.setVolume(app.gpa, vv.user, vv.volume);
@@ -2369,7 +2584,17 @@ pub const App = struct {
             }
             // Outra pessoa entrou ou saiu da nossa call (antes do Store, que ainda
             // tem a lista de antes).
-            if (e == .voice_state and e.voice_state.user != app.store.me and app.store.me != 0) app.othersVoice(e.voice_state.user, e.voice_state.channel);
+            if (e == .voice_state and e.voice_state.user != app.store.me and app.store.me != 0) {
+                app.othersVoice(e.voice_state.user, e.voice_state.channel);
+                if (e.voice_state.channel == null or !e.voice_state.flags.self_video) {
+                    live_video.eng.clearRemoteVideo(e.voice_state.user, false);
+                }
+                if (e.voice_state.channel == null and app.st.watch_owner == e.voice_state.user) {
+                    app.st.watch_owner = 0;
+                    app.st.spotlight_fullscreen = false;
+                    live_video.eng.stopWatch();
+                }
+            }
             if (e == .voice_ping) app.st.voice_ping_ms = e.voice_ping;
             if (e == .voice_audio) app.voiceAudio(e.voice_audio.mic_ok, e.voice_audio.out_ok);
             if (e == .history) timeline.mark(.historico);
@@ -2491,6 +2716,69 @@ pub const App = struct {
         }
         switch (e) {
             .search_results => |r| @import("ui/search.zig").deliver(r),
+            .stream_update => |su| {
+                if (!su.active and st.watch_owner == su.owner) {
+                    st.watch_owner = 0;
+                    st.spotlight_fullscreen = false;
+                    live_video.eng.stopWatch();
+                }
+                if (su.owner == app.store.me) st.stream_on = su.active;
+            },
+            .remote_ctrl_request => |rq| {
+                if (st.settings.remote_ctrl_allow == 0) {
+                    app.cmd(.{ .remote_ctrl_respond = .{ .peer = rq.peer, .perm = .off } });
+                    const who = app.store.nameIn(st.guild, rq.peer) orelse "?";
+                    st.showToast(now(), false, "{s} pediu controle remoto (ative em Config → Voz)", "{s} asked for remote control (enable in Settings → Voice)", .{who});
+                } else {
+                    st.remote_ctrl_req = .{ .peer = rq.peer, .perm = rq.perm };
+                }
+            },
+            .remote_ctrl_state => |rs| {
+                const prev_peer = st.remote_ctrl_peer;
+                st.remote_ctrl_peer = if (rs.status == .idle or rs.status == .denied) 0 else rs.peer;
+                st.remote_ctrl_status = rs.status;
+                st.remote_ctrl_perm = rs.perm;
+                if (rs.status == .denied) {
+                    st.showToast(now(), true, "controle remoto recusado", "remote control denied", .{});
+                } else if (rs.status == .active_host and !app.store.demo and !app.opts.qa) {
+                    if (!st.stream_on and !live_video.eng.watchActive()) {
+                        var disps: [4]@import("platform/media_if.zig").DisplayTarget = undefined;
+                        const cap_be = @import("platform/capture_backend.zig");
+                        const nd = cap_be.enumerateDisplays(&disps);
+                        var target_disp: u64 = 0;
+                        for (disps[0..nd]) |dp| if (dp.primary) {
+                            target_disp = dp.id;
+                            break;
+                        };
+                        if (target_disp == 0 and nd > 0) target_disp = disps[0].id;
+                        const cfg: video_cfg.StreamConfig = .{
+                            .kind = .screen,
+                            .target_id = target_disp,
+                            .resolution = video_cfg.Resolution.fromByte(st.settings.video_res),
+                            .fps = if (st.settings.video_fps == 1) 60 else 30,
+                            .codec = .h264,
+                            .transport = .p2p_direct,
+                            .share_audio = false,
+                            .remote_perm = rs.perm,
+                            .hw_accel = st.settings.video_hw,
+                        };
+                        if (live_video.eng.startNativeCapture(cfg)) app.auto_rc_capture = true;
+                    }
+                } else if (rs.status == .active_viewer and !app.store.demo and !app.opts.qa) {
+                    if (st.watch_owner == 0 and rs.peer != 0) st.watch_owner = rs.peer;
+                } else if (rs.status == .idle or rs.status == .denied) {
+                    stream_view.resetRemoteInput();
+                    if (app.auto_rc_capture) {
+                        app.auto_rc_capture = false;
+                        if (!st.stream_on) live_video.eng.stopWatch();
+                    }
+                    if (!app.store.demo and st.watch_owner != 0 and st.watch_owner == prev_peer and app.store.streamOf(prev_peer) == null) {
+                        st.watch_owner = 0;
+                        st.spotlight_fullscreen = false;
+                        live_video.eng.stopWatch();
+                    }
+                }
+            },
             .invite_created => |r| @import("ui/invites.zig").created(r),
             .moderated => |r| @import("ui/moderacao.zig").delivered(st, &app.store, r, now()),
             .bans => |b| @import("ui/moderacao.zig").bansDelivered(b),
@@ -2991,6 +3279,12 @@ pub const App = struct {
             // é o que mais pede quadro, e só volta ao ritmo da tela quando o mouse para.
             const busy = pending > 0 or (anim.active and !mouse.wanted()) or app.opts.shot != null or app.opts.qa or bench or
                 (login_anim and !app.st.settings.reduce_motion);
+            // Mantém prévia local só quando a janela está visível e assistindo a si mesmo (economia 4K).
+            live_video.eng.preview_wanted.store(!unseen and (app.st.watch_owner == app.store.me), .release);
+            // Mantém simulação de câmera em demo/sem webcam física fluida mesmo fora da grade.
+            if (live_video.eng.cam_synthetic and !app.opts.qa) {
+                anim.every(if (live_video.eng.cam_fps >= 45) 16 else 33);
+            }
             // Dorme até o próximo quadro de um GIF, de uma animação lenta ou
             // do redesenho adiado da rede (o que vier primeiro).
             var due = @min(@min(app.images.next_frame_ms, anim.next_wake_ms), app.sub_wait.due());
@@ -3115,11 +3409,22 @@ pub const App = struct {
                     // Com a lista do autocompletar aberta, setas, Tab, Enter e Esc são dela.
                     const for_list = e.type == c.SDL_EVENT_KEY_DOWN and autocomplete.takeSdlKey(e.key.key, e.key.mod);
                     // The mouse comes in window pixels; ImGui works in points (see NewFrame).
-                    if (e.type == c.SDL_EVENT_MOUSE_MOTION) {
-                        const s = app.uiScale();
-                        e.motion.x /= s;
-                        e.motion.y /= s;
-                    }
+                    const s = app.uiScale();
+                    if (s != 1) switch (e.type) {
+                        c.SDL_EVENT_MOUSE_MOTION => {
+                            e.motion.x /= s;
+                            e.motion.y /= s;
+                        },
+                        c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+                            e.button.x /= s;
+                            e.button.y /= s;
+                        },
+                        c.SDL_EVENT_MOUSE_WHEEL => {
+                            e.wheel.mouse_x /= s;
+                            e.wheel.mouse_y /= s;
+                        },
+                        else => {},
+                    };
                     // Texto em conversão do IME (o backend do SDL3 não o conhece):
                     // o texto decidido continua indo para o ImGui logo abaixo.
                     ime.onSdlEvent(&e);
@@ -3229,6 +3534,7 @@ pub const App = struct {
             bg_dirty = false;
             mouse.frame();
             last_frame_ms = now_ms;
+            live_video.eng.tick(now_ms);
             anim.now_ms = now_ms;
             anim.next_wake_ms = std.math.maxInt(i64);
             anim.clock_wake_ms = std.math.maxInt(i64);
@@ -3407,8 +3713,9 @@ pub const App = struct {
             if (@import("ui/video.zig").takeChanged()) app.gate.redraw();
             // GIF que toca aos poucos: quadro novo na mesma textura, com o desenho igual.
             const gif_changed = app.images.takeChanged();
+            const live_changed = live_video.eng.takeChanged();
             // Igual ao que já está na tela: sem GPU nem present. Prints e QA leem os pixels.
-            const show = app.gate.check(quadro.sum(draw_data, clear), gif_changed or (app.opts.qa and !app.qa_real_gate) or app.opts.shot != null or bench or record_dir != null or quadro.texturesDirty(draw_data));
+            const show = app.gate.check(quadro.sum(draw_data, clear), gif_changed or live_changed or (app.opts.qa and !app.qa_real_gate) or app.opts.shot != null or bench or record_dir != null or quadro.texturesDirty(draw_data));
             app.stats.frames_built = app.gate.built;
             app.stats.frames_skipped = app.gate.skipped;
             if (show) {

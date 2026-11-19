@@ -692,9 +692,17 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
     if (vl.tone == .danger) qa.mark(r, "voice-warning", .{});
     if (vl.tone == .on) qa.mark(r, "voice-transmitting", .{});
     if (connected and ping > 0) qa.mark(r, "voice-ping", .{});
-    // A última linha leva à página de voz.
+    // A última linha leva à página de voz; câmera e tela 4K ficam à direita na mesma altura de 74px para não cortar canais acima.
+    const btn_gap: f32 = 4;
+    const btn_cam_w: f32 = 34;
+    const btn_shr_w: f32 = 46;
+    const sr: d.Rect = .{ .x = r.right() - 6 - btn_shr_w, .y = r.y + 48, .w = btn_shr_w, .h = 22 };
+    const cr: d.Rect = .{ .x = sr.x - btn_gap - btn_cam_w, .y = r.y + 48, .w = btn_cam_w, .h = 22 };
     const line_h: f32 = if (tty) 18 else 22;
-    const lr: d.Rect = .{ .x = r.x + 6, .y = r.bottom() - line_h - 1, .w = r.w - 12, .h = line_h };
+    const lr: d.Rect = if (tty)
+        .{ .x = r.x + 6, .y = r.bottom() - line_h - 1, .w = r.w - 12, .h = line_h }
+    else
+        .{ .x = r.x + 6, .y = r.y + 48, .w = @max(cr.x - (r.x + 6) - 4, 24), .h = line_h };
     const lh = d.hitRaw(ctx, lr);
     qa.mark(lr, "voice-line", .{});
     if (lh.clicked) {
@@ -715,26 +723,40 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         // em que é desenhado: a área de clique fica em cima do rótulo em qualquer
         // escala e com qualquer nome. Nome comprido corta, os dois continuam à vista.
         const view_t = i18n.tr("[ver]", "[view]");
+        const cam_t = i18n.tr("[cam]", "[cam]");
+        const shr_t = i18n.tr("[tela]", "[share]");
         const mix_t = i18n.tr("[mixer]", "[mixer]");
         const leave_t = i18n.tr("[sair]", "[leave]");
         const sp = d.width(bold, fs, " ");
         const view_w = d.width(bold, fs, view_t);
+        const cam_w = d.width(bold, fs, cam_t);
+        const shr_w = d.width(bold, fs, shr_t);
         const mix_w = d.width(bold, fs, mix_t);
         const leave_w = d.width(bold, fs, leave_t);
         const x0 = r.x + 10;
-        const btns_w = sp * 2 + view_w + sp + mix_w + sp + leave_w;
+        const btns_w = sp * 2 + view_w + sp + cam_w + sp + shr_w + sp + mix_w + sp + leave_w;
         const name_w = d.textClipped(ctx.dl, bold, fs, x0, r.y + 3, col, t, @max(r.right() - 8 - x0 - btns_w, 24));
         const view_x = x0 + name_w + sp * 2;
-        const mix_x = view_x + view_w + sp;
+        const cam_x = view_x + view_w + sp;
+        const shr_x = cam_x + cam_w + sp;
+        const mix_x = shr_x + shr_w + sp;
         const leave_x = mix_x + mix_w + sp;
         d.text(ctx.dl, bold, fs, view_x, r.y + 3, if (ctx.st.call_view) ctx.col(.accent) else col, view_t);
+        d.text(ctx.dl, bold, fs, cam_x, r.y + 3, if (ctx.st.cam_on) ctx.col(.online) else col, cam_t);
+        d.text(ctx.dl, bold, fs, shr_x, r.y + 3, if (ctx.st.stream_on) ctx.col(.accent) else col, shr_t);
         d.text(ctx.dl, bold, fs, mix_x, r.y + 3, col, mix_t);
         d.text(ctx.dl, bold, fs, leave_x, r.y + 3, col, leave_t);
         const view_r: d.Rect = .{ .x = view_x - sp / 2, .y = r.y, .w = view_w + sp, .h = 22 };
+        const cam_r: d.Rect = .{ .x = cam_x - sp / 2, .y = r.y, .w = cam_w + sp, .h = 22 };
+        const shr_r: d.Rect = .{ .x = shr_x - sp / 2, .y = r.y, .w = shr_w + sp, .h = 22 };
         const leave_r: d.Rect = .{ .x = leave_x - sp / 2, .y = r.y, .w = leave_w + sp, .h = 22 };
         const mix_r: d.Rect = .{ .x = mix_x - sp / 2, .y = r.y, .w = mix_w + sp, .h = 22 };
         qa.mark(view_r, "voice-view", .{});
         if (d.hitRaw(ctx, view_r).clicked) ctx.act(.{ .show_call = vc });
+        qa.mark(cam_r, "voice-cam", .{});
+        if (d.hitRaw(ctx, cam_r).clicked) ctx.act(.toggle_camera);
+        qa.mark(shr_r, "voice-share", .{});
+        if (d.hitRaw(ctx, shr_r).clicked) ctx.act(if (ctx.st.stream_on) .stop_screen_share else .open_stream_picker);
         qa.mark(leave_r, "hangup", .{});
         if (d.hitRaw(ctx, leave_r).clicked) ctx.act(.leave_voice);
         qa.mark(mix_r, "voice-mixer", .{});
@@ -784,7 +806,7 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
             .bad => i18n.tr("Conexão ruim: a voz pode falhar ou atrasar", "Bad connection: voice may drop or lag"),
         }, ctx.hovering(pr));
     }
-    _ = d.textClipped(ctx.dl, fam.get(if (vl.tone == .quiet) .regular else .semibold), 12, r.x + 28, d.centerY(lr, 12), vl_col, vl.text, r.w - 40 - ping_w);
+    _ = d.textClipped(ctx.dl, fam.get(if (vl.tone == .quiet) .regular else .semibold), 12, r.x + 28, d.centerY(lr, 12), vl_col, vl.text, @max(lr.right() - (r.x + 28) - ping_w, 12));
 
     // Mixer: três faders.
     const mr: d.Rect = .{ .x = r.right() - 80, .y = r.y + 9, .w = 32, .h = 32 };
@@ -816,6 +838,35 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
     d.line(ctx.dl, cx + 5, cy - 5, cx - 5, cy + 5, ink, 2.2);
     d.tip(ctx, br, i18n.tr("Sair da call", "Leave call"), hb.hovered);
     if (hb.clicked) ctx.act(.leave_voice);
+
+    // Botões de vídeo sempre visíveis na barra de voz (74px): Câmera + Tela 4K.
+    const v_rad = @max(ctx.th.radius, 5);
+    {
+        const ch_hit = d.hitRaw(ctx, cr);
+        qa.mark(cr, "voice-cam", .{});
+        const ck = anim.to(anim.id("voice-cam", 0), if (ch_hit.hovered) 1 else 0, 24);
+        const on = ctx.st.cam_on;
+        const cbg = if (on) ctx.col(.online).mix(d.Rgba.black, 0.14 * ck) else ctx.col(.elevated).mix(ctx.col(.hover), ck);
+        d.rect(ctx.dl, cr, cbg, v_rad);
+        const cink = if (on) d.Rgba.white else ctx.col(.text).alpha(0.9);
+        icons.camera(ctx.dl, cr.x + cr.w / 2, cr.y + cr.h / 2, cink.u(), !on);
+        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch_hit.hovered);
+        if (ch_hit.clicked) ctx.act(.toggle_camera);
+    }
+    {
+        const sh_hit = d.hitRaw(ctx, sr);
+        qa.mark(sr, "voice-share", .{});
+        const sk = anim.to(anim.id("voice-share", 0), if (sh_hit.hovered) 1 else 0, 24);
+        const son = ctx.st.stream_on;
+        const sbg = if (son) ctx.col(.accent).mix(d.Rgba.black, 0.14 * sk) else ctx.col(.elevated).mix(ctx.col(.hover), sk);
+        d.rect(ctx.dl, sr, sbg, v_rad);
+        const sink = if (son) d.Rgba.white else ctx.col(.text).alpha(0.9);
+        icons.screen(ctx.dl, sr.x + 12, sr.y + sr.h / 2, sink.u());
+        const slbl = if (son) i18n.tr("Stop", "Stop") else "4K";
+        _ = d.textClipped(ctx.dl, fam.get(.semibold), 10, sr.x + 22, d.centerY(sr, 10), sink, slbl, sr.w - 25);
+        d.tip(ctx, sr, if (son) i18n.tr("Parar compartilhamento de tela", "Stop sharing screen") else i18n.tr("Compartilhar tela / Go Live 4K", "Share screen / Go Live 4K"), sh_hit.hovered);
+        if (sh_hit.clicked) ctx.act(if (son) .stop_screen_share else .open_stream_picker);
+    }
 }
 
 // --- Mensagens diretas ------------------------------------------------------

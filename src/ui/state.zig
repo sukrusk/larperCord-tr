@@ -3,6 +3,8 @@
 const std = @import("std");
 const Id = @import("../core/types.zig").Id;
 const i18n = @import("i18n.zig");
+const ev = @import("../core/event.zig");
+const video_cfg = @import("../core/video_cfg.zig");
 pub const Settings = @import("settings_state.zig").Settings;
 
 /// `voice_move`: os canais de voz para onde dá para mover alguém (id = a pessoa).
@@ -66,6 +68,7 @@ pub const Popup = union(enum) {
     devices: struct { which: DeviceMenu, x: f32, y: f32 },
     /// O nome de um conjunto de abas novo, ou do conjunto `rename` (ui/conjuntos.zig).
     tab_set_name: struct { rename: ?usize = null },
+    stream_picker,
 };
 
 /// Seleção de texto entre mensagens: âncora e cabeça (mensagem + byte).
@@ -207,6 +210,15 @@ pub const State = struct {
     voice_out_failed: bool = false,
     muted: bool = false,
     deafened: bool = false,
+    cam_on: bool = false,
+    stream_on: bool = false,
+    stream_cfg: video_cfg.StreamConfig = .{},
+    watch_owner: Id = 0,
+    spotlight_fullscreen: bool = false,
+    remote_ctrl_peer: Id = 0,
+    remote_ctrl_status: ev.RemoteCtrlStatus = .idle,
+    remote_ctrl_perm: video_cfg.RemotePerm = .off,
+    remote_ctrl_req: ?struct { peer: Id, perm: video_cfg.RemotePerm } = null,
     collapsed: std.AutoHashMapUnmanaged(Id, void) = .empty,
     /// Pastas de servidores abertas na barra.
     open_folders: std.AutoHashMapUnmanaged(u64, void) = .empty,
