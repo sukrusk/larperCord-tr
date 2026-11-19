@@ -3,10 +3,6 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "README*.md"
-  push:
     tags:
       - "v*"
   workflow_dispatch:
