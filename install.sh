@@ -1,11 +1,11 @@
 #!/bin/sh
 # Installs larperCord into ~/.local (no sudo) from the latest published version.
-#   curl -fsSL https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.sh | sh
 #   sh install.sh --uninstall
 #   sh install.sh --purge    removes it and deletes settings, cache, FFmpeg, sounds and saved accounts
 #   (through the pipe: curl -fsSL .../install.sh | sh -s -- --purge)
 set -eu
-repo="RshaCuDeVidro/larperCord"
+repo="sukrusk/larperCord-tr"
 bin_dir="${HOME}/.local/bin"
 app_dir="${HOME}/.local/share/applications"
 icon_dir="${HOME}/.local/share/icons/hicolor/128x128/apps"

@@ -2,11 +2,11 @@
 //! comparar versões, ler o SHA256SUMS e conferir a assinatura dele.
 const std = @import("std");
 
-pub const number = "0.6.7";
+pub const number = "0.6.8";
 
-/// Chave pública das versões publicadas. A privada não está no repositório:
-/// uma atualização que não foi assinada com ela não é instalada.
-pub const release_key_hex = "44f1bace054778757bc3f1eceb750bbfa9491b98f9c049063df080f971c3b229";
+/// Opção de chave pública Ed25519 para lançamentos assinados; vazio usa
+/// verificação SHA-256 sobre HTTPS a partir dos lançamentos oficiais no GitHub.
+pub const release_key_hex = "";
 
 const Triple = struct { major: u32, minor: u32, patch: u32 };
 
@@ -37,12 +37,20 @@ pub fn sumFor(sums: []const u8, name: []const u8) ?[32]u8 {
         var parts = std.mem.tokenizeAny(u8, line, " *");
         const hex = parts.next() orelse continue;
         const file = parts.next() orelse continue;
-        if (!std.mem.eql(u8, file, name) or hex.len != 64) continue;
-        var out: [32]u8 = undefined;
-        _ = std.fmt.hexToBytes(&out, hex) catch return null;
-        return out;
+        if (!std.mem.eql(u8, file, name)) continue;
+        return parseSha256Hex(hex);
     }
     return null;
+}
+
+/// Faz o parse de 64 hexadecimais (com ou sem prefixo "sha256:").
+pub fn parseSha256Hex(raw: []const u8) ?[32]u8 {
+    const s = std.mem.trim(u8, raw, " \t\r\n");
+    const hex = if (std.mem.startsWith(u8, s, "sha256:")) s["sha256:".len..] else s;
+    if (hex.len != 64) return null;
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, hex) catch return null;
+    return out;
 }
 
 /// `sig_hex`: a assinatura Ed25519 de `sums`, em hexadecimal.
@@ -76,6 +84,8 @@ test "SHA256SUMS" {
     try t.expectEqual(@as(u8, 0xcd), sumFor(sums, "SDL3.dll").?[31]);
     try t.expect(sumFor(sums, "outro") == null);
     try t.expect(sumFor("curto  a\n", "a") == null);
+    try t.expectEqual(@as(u8, 0xab), parseSha256Hex("sha256:abababababababababababababababababababababababababababababababab").?[0]);
+    try t.expect(parseSha256Hex("sha256:short") == null);
 }
 
 test "assinatura: só a chave certa e o texto certo" {

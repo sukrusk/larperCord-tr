@@ -59,6 +59,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      - name: Ferramentas para dependências estáticas
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build zstd patch unzip perl
       - run: tools/windows_deps.sh
       # O OpenSSL, o curl e companhia compilados para o .exe único: só mudam com o script.
       - uses: actions/cache@v4

@@ -31,9 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs"
 SITE = ROOT / "site"
-REPO = "https://github.com/RshaCuDeVidro/larperCord"
+REPO = "https://github.com/sukrusk/larperCord-tr"
 VERSION = re.search(r'number = "(.+?)"', (ROOT / "src/core/version.zig").read_text()).group(1)
-BASE_URL = "https://rshacudevidro.github.io/larperCord/"
+BASE_URL = "https://sukrusk.github.io/larperCord-tr/"
 THEMES = ["classico", "vidro", "terminal", "subsolo", "orbital", "editorial", "bolhas", "zen", "papel", "escritorio", "cupertino"]
 LANGS = ["en", "pt"]
 

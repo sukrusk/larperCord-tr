@@ -117,8 +117,10 @@ const theme_names = [_][]const u8{ "classico", "vidro", "terminal", "subsolo", "
 const packed_files = [_][3][]const u8{
     .{ "changelog_en_z", "CHANGELOG.md", "changelog_en.z" },
     .{ "changelog_pt_z", "CHANGELOG.pt-BR.md", "changelog_pt.z" },
+    .{ "changelog_tr_z", "CHANGELOG.tr.md", "changelog_tr.z" },
     .{ "i18n_ja_z", "i18n/ja.kdl", "ja.kdl.z" },
     .{ "i18n_ru_z", "i18n/ru.kdl", "ru.kdl.z" },
+    .{ "i18n_tr_z", "i18n/tr.kdl", "tr.kdl.z" },
     .{ "emoji_blob", "src/ui/emoji_blob.txt", "emoji_blob.z" },
 };
 var packed_paths: ?[packed_files.len]std.Build.LazyPath = null;
@@ -154,7 +156,7 @@ pub fn build(b: *std.Build) void {
     // Windows sem DLL ao lado (tools/windows_static_deps.sh): o das releases desde a 0.6.7,
     // porque só com o curl e o OpenSSL compilados juntos a conexão sai igual à do Chrome.
     // O padrão continua com as DLLs, que não pedem compilar nada.
-    const single_exe = b.option(bool, "single-exe", "Windows: SDL3, curl e OpenSSL dentro do .exe (o das releases)") orelse false;
+    const single_exe = b.option(bool, "single-exe", "Windows: SDL3, curl e OpenSSL dentro do .exe (padrão no Windows)") orelse (target.result.os.tag == .windows);
     // O robô de QA (--qa) e suas marcações só entram onde são usados.
     const qa = b.option(bool, "qa", "Inclui o robô de QA (--qa); padrão: só no debug") orelse !release;
     const build_options = b.addOptions();

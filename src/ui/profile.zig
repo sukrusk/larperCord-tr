@@ -80,13 +80,19 @@ fn elapsed(buf: []u8, ms: i64) []const u8 {
 const months_short = [_][]const u8{ "jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez." };
 const months_short_en = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 const months_short_ru = [_][]const u8{ "янв.", "февр.", "мар.", "апр.", "мая", "июн.", "июл.", "авг.", "сент.", "окт.", "нояб.", "дек." };
+const months_short_tr = [_][]const u8{ "Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara" };
 
 /// "21 de nov. de 2017" / "Nov 21, 2017".
 fn dateShort(buf: []u8, ms: i64) []const u8 {
     const t = w.localTime(@divTrunc(ms, 1000));
     if (i18n.current() == .ja) return std.fmt.bufPrint(buf, "{d}年{d}月{d}日", .{ t.year, t.month, t.day }) catch "";
     const m: usize = t.month - 1;
-    const mon = if (i18n.current() == .ru) months_short_ru[m] else if (i18n.en()) months_short_en[m] else months_short[m];
+    const mon = switch (i18n.current()) {
+        .ru => months_short_ru[m],
+        .tr => months_short_tr[m],
+        .en, .ja => months_short_en[m],
+        .pt => months_short[m],
+    };
     return i18n.fmt(buf, "{d} de {s} de {d}", "{1s} {0d}, {2d}", .{ t.day, mon, t.year });
 }
 

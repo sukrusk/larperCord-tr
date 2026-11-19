@@ -19,6 +19,8 @@ const voz_audio = @import("../net/voz_audio.zig");
 const ptt_global = @import("../platform/ptt_global.zig");
 const channels_ui = @import("comp_channels.zig");
 const dropdown = @import("dropdown.zig");
+const live_video = @import("live_video.zig");
+const video_cfg = @import("../core/video_cfg.zig");
 
 /// Ids de `d.hit` desta página (longe dos sequenciais de settings.Page).
 const base_id: usize = 0x5E000;
@@ -73,6 +75,51 @@ pub fn draw(p: anytype) void {
     p.heading(i18n.tr("Sons", "Sounds"));
     p.toggle(i18n.tr("Sons da call", "Call sounds"), i18n.tr("Avisos curtos ao entrar, sair, mutar, ensurdecer e quando alguém entra ou sai. O toque de chamada segue a escolha dele, abaixo.", "Short cues when you join, leave, mute, deafen and when someone joins or leaves. The ringtone follows its own choice below."), &s.voice_sounds);
     soundList(p, s);
+
+    p.divider();
+    p.heading(i18n.tr("Vídeo e Transmissão 4K", "4K Video & Screen Share"));
+    p.note(i18n.tr(
+        "Resolução padrão para câmera e Go Live em NV12 de baixa memória (~11,9 MiB em 4K).",
+        "Default camera & Go Live quality using low-RAM NV12 frames (~11.9 MiB at 4K).",
+    ));
+    p.segmented(&.{ "720p", "1080p", "1440p", "4K" }, &s.video_res);
+    p.segmented(&.{ "30 FPS", "60 FPS" }, &s.video_fps);
+    p.segmented(&.{ "Auto", "H.264", "HEVC", "AV1" }, &s.video_codec);
+    p.toggle(
+        i18n.tr("Aceleração em GPU (DX11/Media Foundation)", "GPU hardware acceleration (DX11/Media Foundation)"),
+        i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
+        &s.video_hw,
+    );
+    if (p.buttonSoft(i18n.tr("Detectar câmeras", "Detect cameras"))) {
+        var cams: [8]live_video.CamDevice = undefined;
+        const found = live_video.eng.listCameras(&cams);
+        if (found > 0) {
+            s.video_cam_idx = (s.video_cam_idx + 1) % @as(u8, @intCast(found));
+            const dev = &cams[s.video_cam_idx];
+            ctx.st.showToast(ctx.now_ms, false, "câmera #{d}: {s}", "camera #{d}: {s}", .{ s.video_cam_idx + 1, dev.slice() });
+        } else {
+            ctx.st.showToast(ctx.now_ms, false, "nenhuma webcam física encontrada (modo demo simulado disponível)", "no physical webcam found (demo preview available)", .{});
+        }
+    }
+    var cfg_b: [160]u8 = undefined;
+    const res_enum = video_cfg.Resolution.fromByte(s.video_res);
+    const dims = res_enum.dims();
+    p.note(i18n.fmt(
+        &cfg_b,
+        "Buffer NV12 estimado para {d}x{d}: {d:.1} MiB",
+        "Estimated NV12 frame size for {d}x{d}: {d:.1} MiB",
+        .{ dims[0], dims[1], @as(f64, @floatFromInt(video_cfg.nv12ByteSize(dims[0], dims[1]))) / (1024.0 * 1024.0) },
+    ));
+    p.heading(i18n.tr("Controle remoto (AnyDesk)", "Remote Control (AnyDesk)"));
+    p.note(i18n.tr(
+        "Define quem pode pedir controle do seu mouse ou teclado ao assistir sua tela (sempre pede confirmação; F8 encerra na hora).",
+        "Default permission when viewers request mouse/keyboard control on your screen share (always asks consent; F8 kills immediately).",
+    ));
+    p.segmented(&.{
+        i18n.tr("Desligado", "Off"),
+        i18n.tr("Só mouse", "Mouse only"),
+        i18n.tr("Completo", "Full"),
+    }, &s.remote_ctrl_allow);
 }
 
 // --- Sons de cada evento --------------------------------------------------------

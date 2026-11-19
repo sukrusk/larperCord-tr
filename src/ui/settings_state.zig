@@ -184,9 +184,8 @@ pub const Settings = struct {
 
     /// Pergunta ao GitHub se há versão nova ao abrir o app.
     check_updates: bool = true,
-    /// Achou versão nova: baixa e instala sozinho (ela abre na próxima vez). Desligado
-    /// de começo: tem quem prefira escolher a hora.
-    auto_update: bool = false,
+    /// Achou versão nova: baixa e instala sozinho (ela abre na próxima vez).
+    auto_update: bool = true,
 
     // Privacidade (o proxy fica na página Rede)
     send_typing: bool = true,
@@ -324,6 +323,20 @@ pub const Settings = struct {
     language: u8 = 0,
     /// 0 = escuro, 1 = claro, 2 = seguir o sistema.
     color_mode: u8 = 0,
+
+    // Vídeo 4K, transmissão de tela e controle remoto
+    /// 0=720p, 1=1080p, 2=1440p, 3=2160p (4K).
+    video_res: u8 = 3,
+    /// 0=30fps, 1=60fps.
+    video_fps: u8 = 1,
+    /// 0=Auto, 1=H.264, 2=HEVC, 3=AV1.
+    video_codec: u8 = 0,
+    /// Taxa alvo em Mbps (4..45).
+    video_bitrate_mbps: u8 = 18,
+    video_hw: bool = true,
+    video_cam_idx: u8 = 0,
+    /// Controle remoto estilo AnyDesk: 0=Desligado, 1=Só mouse, 2=Mouse+Teclado (sempre pede confirmação).
+    remote_ctrl_allow: u8 = 2,
 
     /// Os painéis estão como o tema pede?
     pub fn panelsAtDefault(s: *const Settings) bool {

@@ -26,6 +26,8 @@ const channels = @import("comp_channels.zig");
 const forum = @import("forum.zig");
 const invites = @import("invites.zig");
 const mascote = @import("mascote.zig");
+const live_video = @import("live_video.zig");
+const stream_view = @import("stream_view.zig");
 const voice_timer = @import("voice_timer.zig");
 const theme_mod = @import("../theme/theme.zig");
 const voz = @import("../core/voz.zig");
@@ -147,16 +149,54 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
     const hb = d.hit(ctx, 8900 + idx, r);
     if (hb.hovered) d.rect(dl, r, ink.alpha(0.06), radius);
     qa.mark(r, "grid-tile:{d}", .{uid});
-    if (hb.clicked or hb.right) openMenu(ctx, uid);
+    const lt = i18n.tr("AO VIVO", "LIVE");
+    const lf = ctx.ui.get(.bold);
+    const live_r: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 12, .h = 20 };
+    if (hb.clicked and vf.self_stream and live_r.contains(ctx.mouse.x, ctx.mouse.y)) {
+        ctx.act(.{ .watch_stream = uid });
+    } else if (hb.clicked or hb.right) {
+        openMenu(ctx, uid);
+    }
+
+    var drew_cam = false;
+    const peer_slot = if (!mine) live_video.eng.peerCamSlot(uid) else null;
+    const cam_slot_opt: ?*live_video.FrameSlot = if (mine and ctx.st.cam_on) &live_video.eng.cam_slot else peer_slot;
+    if (cam_slot_opt) |slot_ptr| {
+        anim.every(if (ctx.st.settings.video_fps == 1) 16 else 33);
+        if (slot_ptr.view(ctx.images.renderer)) |cam_v| {
+            const inner = r.inset(3, 3);
+            const vw: f32 = @floatFromInt(cam_v.w);
+            const vh: f32 = @floatFromInt(cam_v.h);
+            const sc = @min(inner.w / vw, inner.h / vh);
+            const dw = vw * sc;
+            const dh = vh * sc;
+            const vx = inner.x + (inner.w - dw) / 2;
+            const vy = inner.y + (inner.h - dh) / 2;
+            c.ImDrawList_AddImageRounded(
+                dl,
+                cam_v.ref,
+                d.v(vx, vy),
+                d.v(vx + dw, vy + dh),
+                d.v(0, 0),
+                d.v(1, 1),
+                d.Rgba.white.u(),
+                @max(radius - 2, 4),
+                0,
+            );
+            drew_cam = true;
+        }
+    }
 
     const cx = r.x + r.w / 2;
     const cy = r.y + r.h * 0.42;
     if (speaking) {
         d.border(dl, r.inset(1, 1), ctx.col(.online), radius, 3);
-        ring(dl, look.shape, cx, cy, av, ctx.col(.online));
+        if (!drew_cam) ring(dl, look.shape, cx, cy, av, ctx.col(.online));
         qa.mark(r, "grid-speaking:{d}", .{uid});
     }
-    w.avatarAt(ctx, dl, guild, cx, cy, av, uid, look.shape, null, 1, .{ .animate = false, .request = photo_px });
+    if (!drew_cam) {
+        w.avatarAt(ctx, dl, guild, cx, cy, av, uid, look.shape, null, 1, .{ .animate = false, .request = photo_px });
+    }
 
     // O nome e, embaixo, a atividade, centrados (no seu quadro, acima do medidor).
     const name = ctx.store.nameIn(guild, uid) orelse "?";
@@ -204,12 +244,18 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
 
     // Transmitindo: só o selo (assistir fica de fora).
     if (vf.self_stream) {
-        const lt = i18n.tr("AO VIVO", "LIVE");
-        const lf = ctx.ui.get(.bold);
         const lr: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 12, .h = 20 };
-        d.rect(dl, lr, ctx.col(.danger), 5);
+        const spotlight = ctx.st.watch_owner == uid;
+        d.rect(dl, lr, if (spotlight) ctx.col(.online) else ctx.col(.danger), 5);
         d.text(dl, lf, 11, lr.x + 6, d.centerY(lr, 11), d.Rgba.white, lt);
         qa.mark(lr, "grid-live:{d}", .{uid});
+        if (lr.contains(ctx.mouse.x, ctx.mouse.y)) d.tip(ctx, lr, i18n.tr("Assistir transmissão 4K", "Watch 4K stream"), true);
+    } else if (!mine and vf.self_video and !drew_cam) {
+        const ct = "CAM";
+        const cr_b: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, ct) + 12, .h = 20 };
+        d.rect(dl, cr_b, ctx.col(.online), 5);
+        d.text(dl, lf, 11, cr_b.x + 6, d.centerY(cr_b, 11), d.Rgba.white, ct);
+        if (cr_b.contains(ctx.mouse.x, ctx.mouse.y)) d.tip(ctx, cr_b, i18n.tr("Câmera ligada (recebendo quadros…)", "Camera on (receiving frames…)"), true);
     }
 
     if (mine) meter(ctx, dl, r, ink, hb.hovered);
@@ -288,13 +334,15 @@ fn line(ctx: *d.Ctx, dl: *c.ImDrawList, font: *c.ImFont, fs: f32, guild: Id, uid
     const vf = ctx.store.voiceFlags(uid);
     const name = ctx.store.nameIn(guild, uid) orelse "?";
     const act = if (u) |x| x.activity orelse "" else "";
+    const cam_on = if (uid == ctx.store.me) ctx.st.cam_on else (vf.self_video or live_video.eng.peerCamSlot(uid) != null);
     var buf: [256]u8 = undefined;
-    const t = std.fmt.bufPrint(&buf, "{s} {s}{s}{s}{s}{s}", .{
+    const t = std.fmt.bufPrint(&buf, "{s} {s}{s}{s}{s}{s}{s}", .{
         if (speaking) "◉" else "○",
         name,
         channels.voiceFlagsTty(vf),
         if (act.len > 0) "  · " else "",
         act,
+        if (cam_on) "  [CAM]" else "",
         if (vf.self_stream) i18n.tr("  [AO VIVO]", "  [LIVE]") else "",
     }) catch name;
     const hb = d.hit(ctx, 8900 + idx, r);
@@ -310,11 +358,21 @@ fn line(ctx: *d.Ctx, dl: *c.ImDrawList, font: *c.ImFont, fs: f32, guild: Id, uid
     if (vf.self_stream) qa.mark(r, "grid-live:{d}", .{uid});
 }
 
-/// Quem está na call, em quadros ou (nos temas de terminal) em linhas, numa região
+fn ttyHasVideo(ctx: *const d.Ctx, cs: *const ChannelState) bool {
+    if (ctx.st.cam_on) return true;
+    for (cs.voice_members.items) |uid| {
+        if (uid == ctx.store.me) continue;
+        if (ctx.store.voiceFlags(uid).self_video or live_video.eng.peerCamSlot(uid) != null) return true;
+    }
+    return false;
+}
+
+/// Quem está na call, em quadros ou (nos temas de terminal) em linhas (com câmera ao vivo quando ativa), numa região
 /// que rola quando não cabe.
 fn people(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState, tty: bool, region: [*:0]const u8) void {
     const list = cs.voice_members.items;
     const guild = cs.info.guild;
+    const tty_video = tty and list.len > 0 and ttyHasVideo(ctx, cs) and r.h >= 120;
     const dl = d.beginRegion(ctx, region, r, 0);
     const top = c.ImGui_GetCursorScreenPos().y;
     if (list.len == 0) {
@@ -323,7 +381,7 @@ fn people(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState, tty: bo
         d.text(dl, f, 14, r.x + (r.w - d.width(f, 14, t)) / 2, top + r.h / 2 - 8, ctx.col(.muted), t);
         return d.endRegion(ctx, top + r.h, r.x);
     }
-    if (tty) {
+    if (tty and !tty_video) {
         const fam = ctx.familyFor(n);
         const fs = ctx.th.font_size;
         var y = top + 8;
@@ -385,9 +443,28 @@ fn aloneLine(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, fs: f32, cs: *Chann
 pub fn page(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) void {
     // Esc volta para a conversa, se não for para fechar outra coisa (menu, paleta,
     // Configurações, a imagem aberta, a busca) nem estiver digitando.
-    if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and escFree(ctx)) ctx.act(.{ .show_call = 0 });
+    if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and escFree(ctx)) {
+        if (ctx.st.watch_owner != 0) {
+            ctx.act(.{ .watch_stream = 0 });
+        } else {
+            ctx.act(.{ .show_call = 0 });
+        }
+    }
     qa.mark(r, "grid-view", .{});
-    people(ctx, n, r, cs, d.is(n, "variant", "irc", ""), "##call-grid");
+    const tty = d.is(n, "variant", "irc", "");
+    if (ctx.st.watch_owner != 0) {
+        if (ctx.st.spotlight_fullscreen or r.h < 280) {
+            stream_view.draw(ctx, r.inset(12, 8));
+            return;
+        }
+        const stage_h = @round(@max(r.h * 0.68, r.h - 160));
+        const stage_r: d.Rect = .{ .x = r.x + 12, .y = r.y + 8, .w = @max(r.w - 24, 60), .h = @max(stage_h - 12, 60) };
+        stream_view.draw(ctx, stage_r);
+        const strip_r: d.Rect = .{ .x = r.x, .y = r.y + stage_h, .w = r.w, .h = @max(r.h - stage_h, 40) };
+        people(ctx, n, strip_r, cs, tty, "##call-grid");
+        return;
+    }
+    people(ctx, n, r, cs, tty, "##call-grid");
 }
 
 /// O Esc é da tela da call? (Nada aberto por cima que ele deva fechar antes.)
@@ -402,13 +479,14 @@ pub fn escFree(ctx: *const d.Ctx) bool {
 /// botões. Devolve a altura que ocupou (0: a conversa é baixa demais para dividir).
 pub fn dmBand(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) f32 {
     const tty = d.is(n, "variant", "irc", "");
-    const ctl_h: f32 = if (tty) 28 else 60;
+    const tty_video = tty and ttyHasVideo(ctx, cs);
+    const ctl_h: f32 = if (tty and !tty_video) 28 else 60;
     // Sobra pelo menos isto para a conversa embaixo.
     const room = r.h - 80;
-    const min_h: f32 = if (tty) 70 else 160;
+    const min_h: f32 = if (tty and !tty_video) 70 else 130;
     if (room < min_h) return 0;
     const rows: f32 = @floatFromInt(@max(cs.voice_members.items.len, 1));
-    const want = if (tty) rows * (ctx.th.font_size + 10) + 16 + ctl_h else r.h * 0.42;
+    const want = if (tty and !tty_video) rows * (ctx.th.font_size + 10) + 16 + ctl_h else r.h * 0.42;
     const h = std.math.clamp(want, min_h, room);
     const band: d.Rect = .{ .x = r.x, .y = r.y, .w = r.w, .h = h };
     d.rect(ctx.dl, band, ctx.col(.rail).alpha(0.55), 0);
@@ -494,6 +572,12 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
             if (fl.clicked) ctx.act(.{ .flutuante = .{ .abrir = .{ .call = vch } } });
             x += fl.w + 8;
         };
+        const cam_t = textButton(ctx, dl, font, fs, x, y, h, i18n.tr("[cam]", "[cam]"), "grid-cam", if (ctx.st.cam_on) ctx.col(.online) else ctx.col(.muted), 8970);
+        if (cam_t.clicked) ctx.act(.toggle_camera);
+        x += cam_t.w + 8;
+        const shr_t = textButton(ctx, dl, font, fs, x, y, h, i18n.tr("[tela]", "[share]"), "grid-share", if (ctx.st.stream_on) ctx.col(.accent) else ctx.col(.muted), 8971);
+        if (shr_t.clicked) ctx.act(if (ctx.st.stream_on) .stop_screen_share else .open_stream_picker);
+        x += shr_t.w + 8;
         const leave = textButton(ctx, dl, font, fs, x, y, h, i18n.tr("[sair]", "[leave]"), "grid-leave", ctx.col(.danger), 8961);
         if (leave.clicked) ctx.act(.leave_voice);
         return;
@@ -511,7 +595,7 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
     // "Call em janela flutuante": na janela principal, com a gente numa call.
     const pip_ch: ?Id = if (ctx.pip) null else ctx.st.voice;
     const pip_w: f32 = if (pip_ch != null) b + gap else 0;
-    const total = timer_w + dev_w * 2 + b + leave_w + gap * 3 + pip_w;
+    const total = timer_w + dev_w * 2 + b * 3 + leave_w + gap * 5 + pip_w;
     const bar: d.Rect = .{ .x = @round(r.x + (r.w - total) / 2 - inset), .y = @round(r.y + (r.h - b) / 2 - inset), .w = total + inset * 2, .h = b + inset * 2 };
     const bar_r = std.math.clamp(ctx.th.radius * 2, 4, bar.h / 2);
     d.rect(dl, bar, ctx.col(.bg).mix(ctx.col(.elevated), 0.45), bar_r);
@@ -552,6 +636,34 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
         }
         d.tip(ctx, mr, i18n.tr("Mixer da call", "Call mixer"), mh.hovered);
         if (mh.clicked) openMixer(ctx, r);
+        x += b + gap;
+    }
+    // Câmera ao vivo (NV12 de baixa memória).
+    {
+        const cr: d.Rect = .{ .x = x, .y = y, .w = b, .h = b };
+        const ch = d.hit(ctx, 8970, cr);
+        qa.mark(cr, "grid-cam", .{});
+        const k = anim.to(anim.id("grid-cam", 0), if (ch.hovered) 1 else 0, 24);
+        const on = ctx.st.cam_on;
+        const bg = if (on) ctx.col(.online).mix(d.Rgba.black, 0.12 * k) else ctx.col(.elevated).mix(ctx.col(.hover), k);
+        d.rect(dl, cr, bg, btn_r);
+        icons.camera(dl, cr.x + b / 2, cr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u(), !on);
+        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch.hovered);
+        if (ch.clicked) ctx.act(.toggle_camera);
+        x += b + gap;
+    }
+    // Compartilhar tela / Go Live 4K.
+    {
+        const sr: d.Rect = .{ .x = x, .y = y, .w = b, .h = b };
+        const sh = d.hit(ctx, 8971, sr);
+        qa.mark(sr, "grid-share", .{});
+        const k = anim.to(anim.id("grid-share", 0), if (sh.hovered) 1 else 0, 24);
+        const on = ctx.st.stream_on;
+        const bg = if (on) ctx.col(.accent).mix(d.Rgba.black, 0.12 * k) else ctx.col(.elevated).mix(ctx.col(.hover), k);
+        d.rect(dl, sr, bg, btn_r);
+        icons.screen(dl, sr.x + b / 2, sr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u());
+        d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), sh.hovered);
+        if (sh.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
         x += b + gap;
     }
     if (pip_ch) |vch| {

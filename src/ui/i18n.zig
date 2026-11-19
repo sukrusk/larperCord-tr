@@ -18,14 +18,15 @@ const embutido = @import("../core/embutido.zig");
 const c = @import("c");
 const kdl = @import("../theme/kdl.zig");
 
-pub const Lang = enum(u8) { pt, en, ja, ru };
+pub const Lang = enum(u8) { pt, en, ja, ru, tr };
 
 var lang: std.atomic.Value(Lang) = .init(.pt);
 
-/// Os arquivos de tradução embutidos (i18n/ja.kdl, i18n/ru.kdl), comprimidos: abrem
-/// quando o idioma é escolhido (core/embutido.zig).
+/// Os arquivos de tradução embutidos (i18n/ja.kdl, i18n/ru.kdl, i18n/tr.kdl), comprimidos:
+/// abrem quando o idioma é escolhido (core/embutido.zig).
 const ja_packed = @embedFile("i18n_ja_z");
 const ru_packed = @embedFile("i18n_ru_z");
+const tr_packed = @embedFile("i18n_tr_z");
 
 /// Lê um arquivo de tradução a mais (larpercord/i18n/<idioma>.kdl na pasta de
 /// configurações), que vale por cima do embutido: dá para testar uma tradução
@@ -56,7 +57,7 @@ pub fn tr(pt: []const u8, english: []const u8) []const u8 {
     return switch (l) {
         .pt => pt,
         .en => english,
-        .ja, .ru => tableOf(l).?.get(english) orelse english,
+        .ja, .ru, .tr => tableOf(l).?.get(english) orelse english,
     };
 }
 
@@ -65,7 +66,7 @@ pub fn trZ(pt: [:0]const u8, english: [:0]const u8) [:0]const u8 {
     return switch (l) {
         .pt => pt,
         .en => english,
-        .ja, .ru => tableOf(l).?.get(english) orelse english,
+        .ja, .ru, .tr => tableOf(l).?.get(english) orelse english,
     };
 }
 
@@ -98,7 +99,7 @@ pub fn fmt(buf: []u8, comptime pt: []const u8, comptime english: []const u8, arg
     switch (l) {
         .pt => wr.print(pt, args) catch noteCut(english, buf.len),
         .en => wr.print(english, args) catch noteCut(english, buf.len),
-        .ja, .ru => translated(&wr, tableOf(l).?.get(english), english, args) catch noteCut(english, buf.len),
+        .ja, .ru, .tr => translated(&wr, tableOf(l).?.get(english), english, args) catch noteCut(english, buf.len),
     }
     const out = wr.buffered();
     if (out.len < buf.len) return out;
@@ -118,7 +119,7 @@ pub fn fmtZ(buf: []u8, comptime pt: []const u8, comptime english: []const u8, ar
     switch (l) {
         .pt => return std.fmt.bufPrintSentinel(buf, pt, args, 0) catch cutZ(english, buf.len),
         .en => return std.fmt.bufPrintSentinel(buf, english, args, 0) catch cutZ(english, buf.len),
-        .ja, .ru => {
+        .ja, .ru, .tr => {
             if (buf.len == 0) return cutZ(english, 0);
             var wr = std.Io.Writer.fixed(buf[0 .. buf.len - 1]);
             translated(&wr, tableOf(l).?.get(english), english, args) catch return cutZ(english, buf.len);
@@ -138,7 +139,7 @@ pub fn allocPrint(gpa: std.mem.Allocator, comptime pt: []const u8, comptime engl
     switch (l) {
         .pt => return std.fmt.allocPrint(gpa, pt, args),
         .en => return std.fmt.allocPrint(gpa, english, args),
-        .ja, .ru => {
+        .ja, .ru, .tr => {
             var aw: std.Io.Writer.Allocating = .init(gpa);
             defer aw.deinit();
             // O escritor que aloca só falha sem memória.
@@ -366,6 +367,7 @@ const Table = struct {
 var table_arena: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
 var ja_table: Table = .{ .code = "ja", .packed_source = ja_packed };
 var ru_table: Table = .{ .code = "ru", .packed_source = ru_packed };
+var tr_table: Table = .{ .code = "tr", .packed_source = tr_packed };
 
 /// A tabela de um idioma que vem de arquivo (null: português e inglês, que
 /// estão no código).
@@ -374,6 +376,7 @@ fn tableOf(l: Lang) ?*Table {
         .pt, .en => null,
         .ja => &ja_table,
         .ru => &ru_table,
+        .tr => &tr_table,
     };
 }
 
@@ -390,6 +393,7 @@ pub fn system() Lang {
             if (isLang(s, "pt")) return .pt;
             if (isLang(s, "ja")) return .ja;
             if (isLang(s, "ru")) return .ru;
+            if (isLang(s, "tr")) return .tr;
         }
     };
     return .en;
@@ -410,6 +414,7 @@ pub fn fromSetting(v: u8) Lang {
         2 => .en,
         3 => .ja,
         4 => .ru,
+        5 => .tr,
         else => system(),
     };
 }
@@ -527,7 +532,7 @@ test "fmt, fmtZ e allocPrint traduzidos" {
 // texto de formato com os marcadores certos (faltar tradução não é erro).
 test "i18n/*.kdl embutidos: arquivo válido e marcadores certos" {
     var bad: usize = 0;
-    for ([_]*const Table{ &ja_table, &ru_table }) |t| {
+    for ([_]*const Table{ &ja_table, &ru_table, &tr_table }) |t| {
         var a: std.heap.ArenaAllocator = .init(testing.allocator);
         defer a.deinit();
         var diag: kdl.Diagnostic = .{};

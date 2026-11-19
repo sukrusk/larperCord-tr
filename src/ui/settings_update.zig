@@ -16,6 +16,7 @@ const log = @import("../core/changelog.zig");
 /// Comprimidos: abrem na primeira vez que a página aparece (core/embutido.zig).
 const changelog_en = @embedFile("changelog_en_z");
 const changelog_pt = @embedFile("changelog_pt_z");
+const changelog_tr = @embedFile("changelog_tr_z");
 
 pub fn draw(p: anytype) void {
     const ctx = p.ctx;
@@ -61,13 +62,13 @@ pub fn draw(p: anytype) void {
     }
     p.y += 8;
     p.toggle(i18n.tr("Verificar ao abrir", "Check when opening"), i18n.tr("Pergunta ao GitHub qual é a última versão ao abrir o app. Nenhum dado da conta vai junto.", "Asks GitHub for the latest version when the app opens. No account data is sent."), &ctx.st.settings.check_updates);
-    if (!updater.managedBySystem()) p.toggle(i18n.tr("Atualizar sozinho", "Update automatically"), i18n.tr("Achou versão nova, baixa e instala em segundo plano; ela abre na próxima vez que o app abrir. Só entra versão com a assinatura certa.", "When a new version is found, it downloads and installs in the background; it opens the next time the app starts. Only versions with the right signature go in."), &ctx.st.settings.auto_update);
+    if (!updater.managedBySystem()) p.toggle(i18n.tr("Atualizar sozinho", "Update automatically"), i18n.tr("Achou versão nova, baixa e instala em segundo plano; ela abre na próxima vez que o app abrir. O arquivo é conferido por SHA-256 via HTTPS.", "When a new version is found, it downloads and installs in the background; it opens the next time the app starts. Verified with SHA-256 over HTTPS."), &ctx.st.settings.auto_update);
     p.y += 10;
     p.heading(i18n.tr("Reiniciar", "Restart"));
     p.note(i18n.tr("Fecha e abre o larperCord de novo. Se estiver em uma call, ela cai.", "Closes and reopens larperCord. If you're in a call, you'll leave it."));
     if (p.buttonSoft(i18n.tr("Reiniciar o larperCord", "Restart larperCord"))) ctx.act(.restart);
     p.divider();
-    p.note(i18n.tr("Toda atualização é assinada; uma versão sem a assinatura certa não é instalada.", "Every update is signed; a version without the right signature isn't installed."));
+    p.note(i18n.tr("Cada atualização vem por HTTPS do GitHub e é conferida pelo hash SHA-256.", "Every update is fetched over HTTPS from GitHub and verified with SHA-256."));
     if (p.buttonSoft(i18n.tr("Ver as versões no GitHub", "See releases on GitHub"))) att.openUrl(updater.releases_page);
 }
 
@@ -79,9 +80,14 @@ const Version = struct { name: []const u8, sections: []const Section };
 
 var parsed_en: ?[]const Version = null;
 var parsed_pt: ?[]const Version = null;
+var parsed_tr: ?[]const Version = null;
 
 /// O CHANGELOG do idioma, já com o markdown de cada item. Uma vez por idioma.
 fn versions() ?[]const Version {
+    if (i18n.current() == .tr) {
+        if (parsed_tr == null) parsed_tr = load(changelog_tr) catch null;
+        return parsed_tr;
+    }
     const en = i18n.en();
     const slot = if (en) &parsed_en else &parsed_pt;
     if (slot.* == null) slot.* = load(if (en) changelog_en else changelog_pt) catch null;

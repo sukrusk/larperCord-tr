@@ -1,5 +1,22 @@
 # O que mudou em cada versão
 
+## 0.6.8
+
+**Executável único e updates**
+- Builds para Windows passam a gerar um único `larpercord.exe` independente por padrão (com SDL3, libcurl e OpenSSL embutidos).
+- Atualizador apontado para `sukrusk/larperCord-tr` com download e instalação automáticos em segundo plano verificados por SHA-256 via HTTPS.
+
+**Idioma turco e temas**
+- Tradução completa em turco (`tr`) cobrindo mais de 2.160 textos da interface, configurações, datas e notas de versão (`CHANGELOG.tr.md`).
+- Grade de câmera ao vivo e controles de câmera/compartilhamento na barra de voz adicionados a todos os 11 temas (`terminal`, `subsolo`, `zen` e `editorial` incluídos).
+
+**Tela, câmera e remoto**
+- Correção do crash `0xc0000374` de corrupção de heap ao encerrar compartilhamento de tela no Windows e ordem segura de liberação COM em `Loopback.deinit()`.
+- Banner de consentimento de controle remoto clicável sobre o modo tela cheia de DM e escalonamento DPI (`uiScale`) corrigido para cliques do mouse.
+- Correção da câmera remota travada em `receiving frames…` retendo SSRCs inativos em `onVideoSinks` e enviando todos os `video_ssrcs` em `media_sink_wants`.
+- Controle de taxa de envio UDP, retransmissão RTCP Generic NACK (256 pacotes), adaptação de bitrate RTCP REMB, keyframe a cada 2 s e fallback MFT por software.
+- Seletor rolável de janelas/aplicativos com nome `.exe` e captura de áudio isolada via WASAPI Process Loopback (só o app escolhido em modo Janela; sem o PID do Discord em Tela cheia para eliminar eco).
+
 ## 0.6.7
 
 **Janela flutuante**

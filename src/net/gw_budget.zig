@@ -102,6 +102,7 @@ pub const Voice = struct {
     channel: ?Id,
     mute: bool = false,
     deaf: bool = false,
+    video: ?bool = null,
 
     /// O VOICE_STATE_UPDATE da própria conta mostra que este op 4 chegou ao Discord. Saindo,
     /// basta o canal vazio.

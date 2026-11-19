@@ -352,6 +352,8 @@ pub const Store = struct {
     speaking: std.AutoHashMapUnmanaged(Id, i64) = .empty,
     /// Mudo/surdo de quem está em alguma call.
     voice_flags: std.AutoHashMapUnmanaged(Id, event.VoiceFlags) = .empty,
+    streams: std.AutoHashMapUnmanaged(Id, event.StreamInfo) = .empty,
+    stream_metrics: std.AutoHashMapUnmanaged(Id, event.video_cfg.StreamMetrics) = .empty,
     /// Amigos desde (ms), das relações.
     friend_since: std.AutoHashMapUnmanaged(Id, i64) = .empty,
     /// Notas que só a gente vê (buscadas ao abrir o perfil).
@@ -466,6 +468,8 @@ pub const Store = struct {
         s.activities.deinit(s.gpa);
         s.speaking.deinit(s.gpa);
         s.voice_flags.deinit(s.gpa);
+        s.streams.deinit(s.gpa);
+        s.stream_metrics.deinit(s.gpa);
         s.friend_since.deinit(s.gpa);
         var ni = s.notes.valueIterator();
         while (ni.next()) |n| ev_alloc.free(n.*);
@@ -575,6 +579,14 @@ pub const Store = struct {
     /// Mudo/surdo de quem está numa call (o que o último VOICE_STATE disse).
     pub fn voiceFlags(s: *const Store, user_id: Id) event.VoiceFlags {
         return s.voice_flags.get(user_id) orelse .{};
+    }
+
+    pub fn streamOf(s: *const Store, owner: Id) ?event.StreamInfo {
+        return s.streams.get(owner);
+    }
+
+    pub fn metricsOf(s: *const Store, owner: Id) ?event.video_cfg.StreamMetrics {
+        return s.stream_metrics.get(owner);
     }
 
     /// A pessoa está falando agora? (o anel verde some sozinho)
@@ -1197,7 +1209,7 @@ pub const Store = struct {
     pub fn apply(s: *Store, ev: Event, now_ms: i64) !void {
         // O que chega o tempo todo e não aparece na caixa de entrada não conta.
         switch (ev) {
-            .typing_start, .presence_update, .member_face, .voice_state, .voice_member_flags, .voice_speaking, .voice_ping, .voice_audio, .voice_status, .call, .channel_info, .voice_start, .latency, .status, .net_fail, .notice, .member_list, .profile, .relationship, .note, .app_icon, .pins, .pins_changed, .invite, .read, .thread_members, .thread_joined, .thread_open, .threads_page, .conta => {},
+            .typing_start, .presence_update, .member_face, .voice_state, .voice_member_flags, .voice_speaking, .voice_ping, .voice_audio, .voice_status, .stream_update, .stream_metrics, .remote_ctrl_request, .remote_ctrl_state, .call, .channel_info, .voice_start, .latency, .status, .net_fail, .notice, .member_list, .profile, .relationship, .note, .app_icon, .pins, .pins_changed, .invite, .read, .thread_members, .thread_joined, .thread_open, .threads_page, .conta => {},
             else => s.rev +%= 1,
         }
         switch (ev) {
@@ -1241,6 +1253,8 @@ pub const Store = struct {
                     cs.*.voice_start_s = 0;
                 }
                 s.voice_flags.clearRetainingCapacity();
+                s.streams.clearRetainingCapacity();
+                s.stream_metrics.clearRetainingCapacity();
                 // O começo das calls também: cada servidor pede de novo ao aparecer.
                 s.info_asked.clearRetainingCapacity();
                 for (r.voice) |pair| {
@@ -1391,9 +1405,37 @@ pub const Store = struct {
                 if (v.channel == null) {
                     _ = s.speaking.remove(v.user);
                     _ = s.voice_flags.remove(v.user);
-                } else try s.voice_flags.put(s.gpa, v.user, v.flags);
+                    _ = s.streams.remove(v.user);
+                    _ = s.stream_metrics.remove(v.user);
+                } else {
+                    try s.voice_flags.put(s.gpa, v.user, v.flags);
+                    if (!v.flags.self_stream) {
+                        _ = s.streams.remove(v.user);
+                        _ = s.stream_metrics.remove(v.user);
+                    } else if (s.streams.get(v.user) == null) {
+                        try s.streams.put(s.gpa, v.user, .{ .channel = v.channel.?, .owner = v.user, .active = true });
+                    }
+                }
             },
-            .voice_member_flags => |v| try s.voice_flags.put(s.gpa, v.user, v.flags),
+            .voice_member_flags => |v| {
+                try s.voice_flags.put(s.gpa, v.user, v.flags);
+                if (!v.flags.self_stream) {
+                    _ = s.streams.remove(v.user);
+                    _ = s.stream_metrics.remove(v.user);
+                } else if (s.streams.get(v.user) == null) {
+                    try s.streams.put(s.gpa, v.user, .{ .channel = 0, .owner = v.user, .active = true });
+                }
+            },
+            .stream_update => |st| {
+                if (st.active) {
+                    try s.streams.put(s.gpa, st.owner, st);
+                } else {
+                    _ = s.streams.remove(st.owner);
+                    _ = s.stream_metrics.remove(st.owner);
+                }
+            },
+            .stream_metrics => |sm| try s.stream_metrics.put(s.gpa, sm.owner, sm.metrics),
+            .remote_ctrl_request, .remote_ctrl_state => {},
             .voice_ping, .voice_audio => {},
             // A call da DM acabou: ninguém mais está nela (por garantia, se
             // algum VOICE_STATE_UPDATE de saída se perdeu).
@@ -3636,4 +3678,40 @@ test "lista de DMs: o READY de uma reconexão traz a ordem nova" {
     chans[2] = try testDm(11, 3, 300);
     try s.apply(.{ .ready = .{ .me = 1, .users = try c_alloc.alloc(types.User, 0), .guilds = try c_alloc.alloc(types.Guild, 0), .channels = chans, .voice = try c_alloc.alloc([2]Id, 0) } }, 0);
     try std.testing.expectEqualSlices(Id, &.{ 12, 10, 11 }, s.channelsOf(0));
+}
+
+test "stream_update, métricas 4K e self_video no Store" {
+    var s = Store.init(std.testing.allocator);
+    defer s.deinit();
+    try s.apply(.{ .voice_state = .{
+        .channel = 55,
+        .user = 9,
+        .flags = .{ .self_video = true, .self_stream = true },
+    } }, 0);
+    try std.testing.expect(s.voiceFlags(9).self_video);
+    try std.testing.expect(s.streamOf(9) != null);
+
+    try s.apply(.{ .stream_update = .{
+        .channel = 55,
+        .owner = 9,
+        .active = true,
+        .width = 3840,
+        .height = 2160,
+        .fps = 60,
+        .codec = .h264,
+        .remote_perm = .mouse_only,
+    } }, 0);
+    const st = s.streamOf(9).?;
+    try std.testing.expectEqual(@as(u16, 3840), st.width);
+    try std.testing.expectEqual(event.video_cfg.RemotePerm.mouse_only, st.remote_perm);
+
+    try s.apply(.{ .stream_metrics = .{
+        .owner = 9,
+        .metrics = .{ .w = 3840, .h = 2160, .fps_x10 = 600, .ram_bytes = 12_441_600 },
+    } }, 0);
+    try std.testing.expectEqual(@as(u64, 12_441_600), s.metricsOf(9).?.ram_bytes);
+
+    try s.apply(.{ .voice_state = .{ .channel = null, .user = 9 } }, 0);
+    try std.testing.expect(s.streamOf(9) == null);
+    try std.testing.expect(s.metricsOf(9) == null);
 }

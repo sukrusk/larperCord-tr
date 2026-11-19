@@ -1,0 +1,155 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "README*.md"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (leave empty to read src/core/version.zig)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VER: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VER" ]; then
+            ver="${INPUT_VER#v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF_NAME#v}"
+          else
+            ver="$(sed -n 's/^pub const number = "\(.*\)";/\1/p' src/core/version.zig)"
+          fi
+          tag="v$ver"
+          should="true"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Release $tag already exists; skipping auto-release for plain commit."
+              should="false"
+            fi
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: meta
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl xz-utils make gcc g++ cmake ninja-build pkg-config binutils \
+            perl zlib1g-dev libfreetype-dev libfontconfig1-dev libwebp-dev libopus-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev libwayland-bin libdecor-0-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: tools/linux_deps.sh
+      - name: Build Linux x86_64 portable binary
+        run: PKG_CONFIG_PATH=$PWD/.deps/linux/lib/pkgconfig zig build -Dcpu=baseline -Dportable=true -Dversion="${{ needs.meta.outputs.version }}"
+      - name: Rename artifact
+        run: cp zig-out/bin/larpercord larpercord-linux-x86_64 && chmod +x larpercord-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: larpercord-linux-x86_64
+          if-no-files-found: error
+
+  windows:
+    needs: meta
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cross-build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build zstd patch unzip perl make ca-certificates curl xz-utils
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: tools/windows_deps.sh
+      - uses: actions/cache@v4
+        with:
+          path: .deps/windows-static
+          key: windows-static-${{ hashFiles('tools/windows_static_deps.sh', 'tools/curl-chrome-h2.patch', 'tools/brotlienc_stub.c') }}
+      - run: test -f .deps/windows-static/lib/libcurl.a || tools/windows_static_deps.sh
+      - name: Build Windows x86_64 single standalone .exe
+        run: zig build -Dtarget=x86_64-windows-gnu -Dsingle-exe=true -Dversion="${{ needs.meta.outputs.version }}" -p out/win
+      - name: Prepare release file
+        run: |
+          mkdir -p rel
+          cp out/win/bin/larpercord.exe rel/larpercord-windows-x86_64.exe
+          test -s rel/larpercord-windows-x86_64.exe
+          ls -lh rel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: rel/larpercord-windows-x86_64.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, linux, windows]
+    if: needs.meta.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-windows
+          path: dist
+      - name: Generate SHA256SUMS and Turkish release notes
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum larpercord-linux-x86_64 larpercord-windows-x86_64.exe > SHA256SUMS)
+          ver="${{ needs.meta.outputs.version }}"
+          awk -v v="## $ver" '$0==v{on=1;next} /^## /{on=0} on' CHANGELOG.tr.md > notes.md
+          if [ ! -s notes.md ]; then
+            awk -v v="## $ver" '$0==v{on=1;next} /^## /{on=0} on' CHANGELOG.md > notes.md
+          fi
+          if [ ! -s notes.md ]; then
+            printf "larperCord %s tek dosyalı Windows (.exe) ve taşınabilir Linux sürümü.\n" "$ver" > notes.md
+          fi
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.meta.outputs.tag }}"
+          ver="${{ needs.meta.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "${{ github.repository }}" --clobber dist/larpercord-windows-x86_64.exe dist/larpercord-linux-x86_64 dist/SHA256SUMS
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes-file notes.md
+          else
+            gh release create "$tag" --repo "${{ github.repository }}" --title "larperCord $ver" --notes-file notes.md dist/larpercord-windows-x86_64.exe dist/larpercord-linux-x86_64 dist/SHA256SUMS
+          fi

@@ -350,3 +350,50 @@ pub fn pip(dl: *c.ImDrawList, cx_in: f32, cy_in: f32, col: u32) void {
     c.ImDrawList_AddRectEx(dl, v(cx - 8, cy - 6.5), v(cx + 8, cy + 6.5), col, 2.5, 1.6, 0);
     c.ImDrawList_AddRectFilledEx(dl, v(cx + 0.5, cy + 0.5), v(cx + 5.5, cy + 4), col, 1, 0);
 }
+
+/// Câmera de vídeo em traço para call e prévia.
+pub fn camera(dl: *c.ImDrawList, cx: f32, cy: f32, col: u32, off: bool) void {
+    const th: f32 = 1.7;
+    c.ImDrawList_AddRectEx(dl, v(cx - 8.5, cy - 5.5), v(cx + 3.5, cy + 5.5), col, 2.5, th, 0);
+    const lens = [_]c.ImVec2{ v(cx + 3.5, cy - 2), v(cx + 9, cy - 5), v(cx + 9, cy + 5), v(cx + 3.5, cy + 2) };
+    c.ImDrawList_AddPolyline(dl, &lens[0], lens.len, col, th, c.ImDrawFlags_Closed);
+    if (off) line(dl, cx - 8.5, cy + 7.5, cx + 8.5, cy - 7.5, col, 2.0);
+}
+
+/// Monitor com seta indicando compartilhamento de tela Go Live.
+pub fn screen(dl: *c.ImDrawList, cx: f32, cy: f32, col: u32) void {
+    const th: f32 = 1.7;
+    c.ImDrawList_AddRectEx(dl, v(cx - 9, cy - 7), v(cx + 9, cy + 4.5), col, 2.0, th, 0);
+    line(dl, cx - 4, cy + 8, cx + 4, cy + 8, col, th);
+    line(dl, cx, cy + 4.5, cx, cy + 8, col, th);
+    line(dl, cx, cy - 4, cx, cy + 1.5, col, th);
+    line(dl, cx - 3, cy - 1, cx, cy - 4, col, th);
+    line(dl, cx + 3, cy - 1, cx, cy - 4, col, th);
+}
+
+/// Ponteiro de controle remoto (estilo AnyDesk).
+pub fn remoteMouse(dl: *c.ImDrawList, cx: f32, cy: f32, col: u32) void {
+    const pts = [_]c.ImVec2{
+        v(cx - 5.5, cy - 7),
+        v(cx + 6, cy + 1),
+        v(cx + 0.5, cy + 1.8),
+        v(cx + 3.2, cy + 7),
+        v(cx + 1.0, cy + 8),
+        v(cx - 1.8, cy + 2.8),
+        v(cx - 5.5, cy + 6.2),
+    };
+    c.ImDrawList_AddPolyline(dl, &pts[0], pts.len, col, 1.6, c.ImDrawFlags_Closed);
+}
+
+/// Cantos expandidos de tela cheia.
+pub fn fullscreen(dl: *c.ImDrawList, cx: f32, cy: f32, col: u32) void {
+    const th: f32 = 1.7;
+    line(dl, cx - 7, cy - 7, cx - 2.5, cy - 7, col, th);
+    line(dl, cx - 7, cy - 7, cx - 7, cy - 2.5, col, th);
+    line(dl, cx + 7, cy - 7, cx + 2.5, cy - 7, col, th);
+    line(dl, cx + 7, cy - 7, cx + 7, cy - 2.5, col, th);
+    line(dl, cx - 7, cy + 7, cx - 2.5, cy + 7, col, th);
+    line(dl, cx - 7, cy + 7, cx - 7, cy + 2.5, col, th);
+    line(dl, cx + 7, cy + 7, cx + 2.5, cy + 7, col, th);
+    line(dl, cx + 7, cy + 7, cx + 7, cy + 2.5, col, th);
+}

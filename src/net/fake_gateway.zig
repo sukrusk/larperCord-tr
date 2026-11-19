@@ -248,6 +248,10 @@ pub const Gateway = struct {
     search_indexed: bool = false,
     voice: ?*voice_mod.Voice = null,
     voice_channel: ?Id = null,
+    voice_mute: bool = false,
+    voice_deaf: bool = false,
+    voice_video: bool = false,
+    voice_stream: bool = false,
     /// A call que começou quando entramos num canal de voz vazio (o AFK): acaba
     /// quando saímos, com o VOICE_CHANNEL_START_TIME_UPDATE de cada ponta.
     own_session: ?struct { channel: Id, start_s: i64 } = null,
@@ -585,6 +589,19 @@ pub const Gateway = struct {
             try g.vflags.put(alloc, vf.user, vf.flags);
             g.emit(.{ .voice_member_flags = .{ .user = vf.user, .flags = vf.flags } });
         }
+        g.emit(.{ .stream_update = .{
+            .channel = channelId(0, 13),
+            .guild = guildOfChannel(channelId(0, 13)),
+            .owner = 1003,
+            .active = true,
+            .source = .demo_4k,
+            .width = 3840,
+            .height = 2160,
+            .fps = 60,
+            .codec = .h264,
+            .has_audio = true,
+            .remote_perm = .full,
+        } });
         // O @everyone do segundo servidor (que não é nosso): com ele, o #bugs
         // e o AFK de lá aparecem trancados (demoOverwrites).
         {
@@ -942,17 +959,29 @@ pub const Gateway = struct {
                     };
                     g.emit(.{ .voice_status = .{ .status = if (v.channel != null) .connected else .disconnected, .channel = v.channel orelse 0 } });
                     if (v.channel) |ch| {
+                        g.voice_mute = v.mute;
+                        g.voice_deaf = v.deaf;
+                        g.voice_video = false;
+                        g.voice_stream = false;
                         g.startVoice(v.guild, ch, v.mute, v.deaf);
                         g.voice_channel = ch;
                         g.emit(.{ .voice_ping = 38 + g.rng.random().uintLessThan(u32, 24) });
                     } else {
                         g.stopVoice();
                         g.voice_channel = null;
+                        g.voice_video = false;
+                        g.voice_stream = false;
                     }
                 },
                 .voice_flags => |f| {
+                    g.voice_mute = f.mute;
+                    g.voice_deaf = f.deaf;
                     if (g.voice) |vc| vc.setFlags(f.mute, f.deaf);
-                    g.emit(.{ .voice_state = .{ .channel = g.voice_channel, .user = me_id, .flags = .{ .self_mute = f.mute, .self_deaf = f.deaf } } });
+                    g.emit(.{ .voice_state = .{
+                        .channel = g.voice_channel,
+                        .user = me_id,
+                        .flags = .{ .self_mute = f.mute, .self_deaf = f.deaf, .self_video = g.voice_video, .self_stream = g.voice_stream },
+                    } });
                 },
                 .voice_volume => |v| {
                     sent.gain_milli.store(@intFromFloat(@round(std.math.clamp(v.volume, 0, 2) * 1000)), .release);
@@ -962,6 +991,91 @@ pub const Gateway = struct {
                     sent.dsp_bits.store(@as(u64, @intFromBool(v.denoise)) | (@as(u64, @intFromBool(v.level)) << 1), .release);
                     sent.dsp_user.store(v.user, .release);
                 },
+                .start_video => {
+                    g.voice_video = true;
+                    g.emit(.{ .voice_state = .{
+                        .channel = g.voice_channel,
+                        .user = me_id,
+                        .flags = .{ .self_mute = g.voice_mute, .self_deaf = g.voice_deaf, .self_video = true, .self_stream = g.voice_stream },
+                    } });
+                },
+                .stop_video => {
+                    g.voice_video = false;
+                    g.emit(.{ .voice_state = .{
+                        .channel = g.voice_channel,
+                        .user = me_id,
+                        .flags = .{ .self_mute = g.voice_mute, .self_deaf = g.voice_deaf, .self_video = false, .self_stream = g.voice_stream },
+                    } });
+                },
+                .start_stream => |cfg| {
+                    g.voice_stream = true;
+                    const ch = g.voice_channel orelse 0;
+                    const dims = cfg.resolution.dims();
+                    g.emit(.{ .voice_state = .{
+                        .channel = g.voice_channel,
+                        .user = me_id,
+                        .flags = .{ .self_mute = g.voice_mute, .self_deaf = g.voice_deaf, .self_video = g.voice_video, .self_stream = true },
+                    } });
+                    g.emit(.{ .stream_update = .{
+                        .channel = ch,
+                        .guild = guildOfChannel(ch),
+                        .owner = me_id,
+                        .active = true,
+                        .source = cfg.kind,
+                        .width = @intCast(dims[0]),
+                        .height = @intCast(dims[1]),
+                        .fps = cfg.fps,
+                        .codec = cfg.codec,
+                        .has_audio = cfg.share_audio,
+                        .remote_perm = cfg.remote_perm,
+                    } });
+                },
+                .stop_stream => {
+                    g.voice_stream = false;
+                    const ch = g.voice_channel orelse 0;
+                    g.emit(.{ .voice_state = .{
+                        .channel = g.voice_channel,
+                        .user = me_id,
+                        .flags = .{ .self_mute = g.voice_mute, .self_deaf = g.voice_deaf, .self_video = g.voice_video, .self_stream = false },
+                    } });
+                    g.emit(.{ .stream_update = .{ .channel = ch, .owner = me_id, .active = false } });
+                },
+                .watch_stream => |ws| {
+                    if (ws.watch) {
+                        g.emit(.{ .stream_update = .{
+                            .channel = ws.channel,
+                            .guild = ws.guild,
+                            .owner = ws.owner,
+                            .active = true,
+                            .source = .demo_4k,
+                            .width = 3840,
+                            .height = 2160,
+                            .fps = 60,
+                            .codec = .h264,
+                            .has_audio = true,
+                            .remote_perm = .full,
+                        } });
+                    }
+                },
+                .remote_ctrl_request => |r| {
+                    // Na demo, responde imediatamente concedendo a permissão pedida para testar o fluxo AnyDesk.
+                    g.emit(.{ .remote_ctrl_state = .{
+                        .peer = r.peer,
+                        .status = .active_viewer,
+                        .perm = r.perm,
+                    } });
+                },
+                .remote_ctrl_respond => |r| {
+                    g.emit(.{ .remote_ctrl_state = .{
+                        .peer = r.peer,
+                        .status = if (r.perm == .off) .denied else .active_host,
+                        .perm = r.perm,
+                    } });
+                },
+                .remote_ctrl_stop => |peer| {
+                    g.emit(.{ .remote_ctrl_state = .{ .peer = peer, .status = .idle, .perm = .off } });
+                },
+                .remote_ctrl_input => {},
                 .call_ring => |ch| {
                     _ = sent.rings.fetchAdd(1, .monotonic);
                     sent.ring_channel.store(ch, .release);

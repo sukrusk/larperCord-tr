@@ -6,7 +6,7 @@
 
 Zig · SDL3 · Dear ImGui · FreeType · zero Electron
 
-[English](README.md) · **Português**
+[Türkçe](README.md) · [English](README.en.md) · **Português**
 
 ![Temas do larperCord](docs/themes.png)
 
@@ -204,7 +204,7 @@ Todos têm **modo claro e escuro** e **opções próprias** em Configurações �
 
 ## Instalação
 
-**Baixar:** [Linux](https://github.com/RshaCuDeVidro/larperCord/releases/latest/download/larpercord-linux-x86_64) · [Windows](https://github.com/RshaCuDeVidro/larperCord/releases/latest/download/larpercord-windows-x86_64.zip) · [todas as versões](https://github.com/RshaCuDeVidro/larperCord/releases).
+**Baixar:** [Linux](https://github.com/sukrusk/larperCord-tr/releases/latest/download/larpercord-linux-x86_64) · [Windows](https://github.com/sukrusk/larperCord-tr/releases/latest/download/larpercord-windows-x86_64.zip) · [todas as versões](https://github.com/sukrusk/larperCord-tr/releases).
 
 No Linux, marque o arquivo como executável e rode: `chmod +x larpercord-linux-x86_64 && ./larpercord-linux-x86_64`. Ele pode ficar com esse nome: a atualização troca esse mesmo arquivo. Deixe-o numa pasta sua, como `~/.local/bin`, para ele conseguir se atualizar.
 
@@ -216,7 +216,7 @@ Num desktop Wayland, o app conecta nativamente pelo SDL3; não precisa de XWayla
 
 Quem desenvolve pode conferir Wayland nativo nas escalas 1× e 2×, a escolha explícita de backend e a alternativa X11 com `python3 tools/qa_wayland.py zig-out/bin/larpercord` depois de compilar (precisa de Weston, Xvfb e Python 3). O teste usa um compositor separado sem tela, dados de demonstração e nenhuma GPU ou conta do Discord.
 
-O GitHub Actions compila o arquivo para Linux a partir do código deste repositório. Com o GitHub CLI dá para conferir: `gh attestation verify larpercord-linux-x86_64 --repo RshaCuDeVidro/larperCord`. Os arquivos para Windows ainda não têm atestado, então confira com o `SHA256SUMS` da mesma versão. No PowerShell, na pasta com os dois arquivos (`True` quer dizer que bate):
+O GitHub Actions compila o arquivo para Linux a partir do código deste repositório. Com o GitHub CLI dá para conferir: `gh attestation verify larpercord-linux-x86_64 --repo sukrusk/larperCord-tr`. Os arquivos para Windows ainda não têm atestado, então confira com o `SHA256SUMS` da mesma versão. No PowerShell, na pasta com os dois arquivos (`True` quer dizer que bate):
 
 ```powershell
 (Get-FileHash .\larpercord-windows-x86_64.zip).Hash -eq ((Select-String 'larpercord-windows-x86_64.zip' .\SHA256SUMS).Line -split '\s+')[0]
@@ -229,18 +229,18 @@ Ou use um script:
 **Linux** (x86_64, sem sudo: o programa em `~/.local/bin`, com entrada no menu de aplicativos e ícone):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.sh | sh
 ```
 
 **Windows 10/11** (para o seu usuário, sem administrador: o programa em `%LOCALAPPDATA%\Programs\larperCord`, com entrada no menu Iniciar), no PowerShell. Se o larperCord estiver aberto, o script fecha antes:
 
 ```powershell
-irm https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.ps1 | iex
 ```
 
-Os dois baixam a última [versão publicada](https://github.com/RshaCuDeVidro/larperCord/releases) e conferem com o `SHA256SUMS`. No Linux o script lista as bibliotecas do sistema que faltam. Numa distro de antes de 2022, [compile do código](#compilando). Depois disso, o app se atualiza sozinho: Configurações → Atualizações. Rodar um script de novo também instala a versão mais nova.
+Os dois baixam a última [versão publicada](https://github.com/sukrusk/larperCord-tr/releases) e conferem com o `SHA256SUMS`. No Linux o script lista as bibliotecas do sistema que faltam. Numa distro de antes de 2022, [compile do código](#compilando). Depois disso, o app se atualiza sozinho: Configurações → Atualizações. Rodar um script de novo também instala a versão mais nova.
 
-Para remover: `curl -fsSL https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.sh | sh -s -- --uninstall` no Linux, ou no PowerShell `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.ps1))) -Uninstall`. Assim as configurações ficam. Com `--purge` (Linux) ou `-Purge` (Windows) no lugar, ele também apaga as configurações, o cache, o FFmpeg baixado, os seus sons e as contas salvas. Para apagar tudo isso e manter o app instalado, use Configurações → Avançado → "Apagar todos os dados…".
+Para remover: `curl -fsSL https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.sh | sh -s -- --uninstall` no Linux, ou no PowerShell `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.ps1))) -Uninstall`. Assim as configurações ficam. Com `--purge` (Linux) ou `-Purge` (Windows) no lugar, ele também apaga as configurações, o cache, o FFmpeg baixado, os seus sons e as contas salvas. Para apagar tudo isso e manter o app instalado, use Configurações → Avançado → "Apagar todos os dados…".
 
 ## Conectando sua conta
 
@@ -364,7 +364,7 @@ de novo só traz a janela de volta.
 Atalhos: `Ctrl+K` paleta · `Ctrl+,` configurações · `Ctrl+I` caixa de entrada · `Ctrl+Shift+S` salvas · `F2` próximo tema · `Ctrl+Tab` abas ·
 `Alt+1…9` · `Ctrl+W` fecha aba · `Ctrl+Clique` abre canal em nova aba · `↑` edita a última
 mensagem · `Esc` cancela resposta/edição · `Ctrl+C` copia a seleção · `Ctrl+Shift+M` mudo ·
-`Ctrl+Shift+D` ensurdecer · botão direito em tudo. [Todos os atalhos →](https://rshacudevidro.github.io/larperCord/pt/guide/shortcuts.html)
+`Ctrl+Shift+D` ensurdecer · botão direito em tudo. [Todos os atalhos →](https://sukrusk.github.io/larperCord-tr/pt/guide/shortcuts.html)
 
 ## Arquitetura
 

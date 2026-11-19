@@ -1,5 +1,5 @@
 # Installs larperCord for the current user, no administrator needed.
-#   irm https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/sukrusk/larperCord-tr/main/install.ps1 | iex
 #   Uninstall: & ([scriptblock]::Create((irm .../install.ps1))) -Uninstall
 #   Also delete settings, cache, FFmpeg, sounds and saved accounts: the same with -Purge
 param([switch]$Uninstall, [switch]$Purge)
@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$repo = 'RshaCuDeVidro/larperCord'
+$repo = 'sukrusk/larperCord-tr'
 $dir = Join-Path $env:LOCALAPPDATA 'Programs\larperCord'
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'larperCord.lnk'
 

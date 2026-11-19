@@ -143,7 +143,8 @@ fn popupKey(p: state.Popup) u64 {
         .devices => |dv| 25 +% @as(u64, @intFromEnum(dv.which)),
         .tab_set_name => |t| 26 +% (if (t.rename) |i| @as(u64, i) + 1 else 0) *% 31,
         .lembrete => |t| 27 +% t.message *% 31 +% @as(u64, t.edit) *% 17,
-        .exportar => |t| 27 +% t.channel *% 31,
+        .exportar => |t| 28 +% t.channel *% 31,
+        .stream_picker => 29,
     };
 }
 
@@ -228,6 +229,7 @@ pub fn draw(ctx: *d.Ctx) void {
         .devices => |dv| @import("device_menu.zig").draw(ctx, dv.which, dv.x, dv.y),
         .tab_set_name => |t| @import("conjuntos.zig").drawName(ctx, t.rename),
         .exportar => |t| exportar_ui.drawDialog(ctx, t.channel),
+        .stream_picker => @import("stream_picker.zig").draw(ctx),
         .none => {},
     }
     animateOpen(ctx);
@@ -429,6 +431,11 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
             if (voice_items) {
                 add(&items, &n, .{ .label = "Volume do usuário", .en = "User Volume", .id = id_volume, .sep = true });
                 add(&items, &n, .{ .label = "Silenciar para mim", .en = "Mute for Me", .id = id_mute_local, .on = ctx.st.volumes.isMuted(id) });
+                if (ctx.store.streamOf(id) != null or ctx.store.voiceFlags(id).self_stream) {
+                    add(&items, &n, .{ .label = "Assistir transmissão", .en = "Watch Stream", .id = 30 });
+                }
+                add(&items, &n, .{ .label = "Pedir controle (Mouse)", .en = "Request Control (Mouse)", .id = 31 });
+                add(&items, &n, .{ .label = "Pedir controle completo", .en = "Request Full Control", .id = 32 });
             }
             // Amizade, ignorar e bloquear vão para a conta (ui/conta_menu.zig).
             const conta_at = n;
@@ -866,6 +873,9 @@ fn choose(ctx: *d.Ctx, kind: state.MenuKind, id: Id, item: u8, r: d.Rect) void {
         24 => if (ctx.store.user(id)) |u| copyFmt(ctx, "{s}", .{u.name}),
         28 => st.popup = .{ .menu = .{ .kind = .voice_move, .id = id, .x = r.x + r.w - 8, .y = r.y + r.h - 70 } },
         29 => if (movable(ctx, id)) |cs| ctx.act(.{ .move_member = .{ .guild = cs.info.guild, .user = id, .channel = null } }),
+        30 => ctx.act(.{ .watch_stream = id }),
+        31 => ctx.act(.{ .request_remote_ctrl = .{ .peer = id, .perm = .mouse_only } }),
+        32 => ctx.act(.{ .request_remote_ctrl = .{ .peer = id, .perm = .full } }),
         40, 60 => ctx.act(.{ .mark_read = id }),
         41 => {
             st.tabs.append(st.gpa, id) catch {};

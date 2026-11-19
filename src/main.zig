@@ -157,6 +157,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         } else if (std.mem.eql(u8, arg, "--version")) {
             return printVersion();
+        } else if (std.mem.eql(u8, arg, "--hw-probe")) {
+            @import("platform/capture_backend.zig").runSelfProbe();
+            const rc_ok = @import("net/remote_ctrl.zig").runLoopbackSelfTest() catch false;
+            std.debug.print("hw-probe: AnyDesk X25519 UDP loopback ok={any}\n", .{rc_ok});
+            if (sys.windows) {
+                const win_in = @import("platform/win/input_inject.zig");
+                if (win_in.Injector.init(0)) |inj_in| {
+                    var inj = inj_in;
+                    inj.deinit();
+                    std.debug.print("hw-probe: Windows SendInput Injector init+deinit ok\n", .{});
+                } else |ierr| {
+                    std.debug.print("hw-probe: Windows SendInput err={s}\n", .{@errorName(ierr)});
+                }
+            }
+            return;
         } else return fail("opção desconhecida (veja --help)");
     }
 

@@ -1452,7 +1452,7 @@ tasks.push(test("site header: grouped menus, plain links without JS, try link on
     for (const m of head.matchAll(/<a class="nav-trig" href="([^"]+)"/g)) assert.ok(/#(themes|features)$/.test(m[1]), file + " trigger links somewhere: " + m[1]);
     assert.ok(/class="nav-burger"[^>]*aria-controls="site-nav"[^>]*aria-expanded="false"/.test(head), file + " burger");
     assert.ok(head.includes('id="site-nav"') && head.includes('id="nav-m-themes"') && head.includes('id="nav-m-why"'), file + " ids");
-    assert.ok(head.includes("ko-fi.com") && head.includes("github.com/RshaCuDeVidro/larperCord"), file + " links");
+    assert.ok(head.includes("ko-fi.com") && head.includes("github.com/sukrusk/larperCord-tr"), file + " links");
     assert.ok(/class="nav-lang"[^>]*hreflang="(pt-BR|en)"/.test(head), file + " language");
     assert.ok(!/<img/.test(head), file + " no images in the header");
   }
@@ -1475,7 +1475,7 @@ tasks.push(test("builder page keeps the strict CSP and the install instructions"
     const page = fs.readFileSync(path.join(ROOT, file), "utf8");
     assert.ok(page.includes("Content-Security-Policy\" content=\"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;"), file + " CSP");
     assert.ok(page.includes("object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'self'; form-action 'none'"), file + " CSP rest");
-    assert.ok(!/<script[^>]+src="https?:/.test(page) && !/<link[^>]+href="https?:\/\/(?!rshacudevidro)/.test(page.replace(/<link rel="(canonical|alternate)"[^>]*>/g, "")), file + " nothing from outside");
+    assert.ok(!/<script[^>]+src="https?:/.test(page) && !/<link[^>]+href="https?:\/\/(?!sukrusk)/.test(page.replace(/<link rel="(canonical|alternate)"[^>]*>/g, "")), file + " nothing from outside");
     assert.ok(!/<script(?![^>]*\bsrc=)(?![^>]*application\/json)[^>]*>/.test(page), file + " no inline script");
     for (const id of ["tbx-os-p-linux", "tbx-os-p-win", "tbx-export", "tbx-p-colors", "tbx-p-gen", "tbx-p-layout", "tbx-p-type", "tbx-p-code", "tbx-p-file"]) assert.ok(page.includes('id="' + id + '"'), file + " " + id);
     assert.ok(page.includes(".config/larpercord/themes") && page.includes("$env:APPDATA"), file + " both systems");

@@ -1558,7 +1558,7 @@ pub fn writeFile(l: *const Look, meta: Meta, out: *std.ArrayList(u8), gpa: std.m
     const o = &w.writer;
     try o.writeAll("// A larperCord mascot (Settings → Mascot → Customize → Save as file).\n");
     try o.writeAll("// Edit it and save: the app reloads it right away. Guide:\n");
-    try o.writeAll("// https://rshacudevidro.github.io/larperCord/guide/mascots.html\n");
+    try o.writeAll("// https://github.com/sukrusk/larperCord-tr/blob/main/mascots/README.md\n");
     try o.writeAll("mascot ");
     try kdlString(o, meta.title);
     if (meta.author.len > 0) {

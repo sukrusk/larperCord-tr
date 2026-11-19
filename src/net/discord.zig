@@ -39,6 +39,7 @@ const status_proto = @import("status_proto.zig");
 const leitura = @import("../core/leitura.zig");
 const read_json = @import("read_state_json.zig");
 const voice_mod = @import("voice.zig");
+const remote_ctrl = @import("remote_ctrl.zig");
 const voz_movido = @import("voz_movido.zig");
 const call_json = @import("call_json.zig");
 const voice_info = @import("voice_info_json.zig");
@@ -61,6 +62,7 @@ const audio_formato = @import("../core/audio_formato.zig");
 const media_refresh = @import("../core/media_refresh.zig");
 const stickers = @import("../core/stickers.zig");
 const rpc_proto = @import("rpc_proto.zig");
+const video_cfg = @import("../core/video_cfg.zig");
 const interaction = @import("../core/interaction.zig");
 const Id = types.Id;
 const Value = std.json.Value;
@@ -81,6 +83,13 @@ const identity_props = web.super_properties;
 const client_state_json =
     \\{"guild_hashes":{},"highest_last_message_id":"0","read_state_version":0,"user_guild_settings_version":-1,"user_settings_version":-1}
 ;
+
+const StreamRtcMeta = struct {
+    key: [96]u8 = @splat(0),
+    len: u8 = 0,
+    rtc_server: Id = 0,
+    rtc_channel: Id = 0,
+};
 
 pub const Gateway = struct {
     commands: Queue(ev.Command),
@@ -110,6 +119,27 @@ pub const Gateway = struct {
     voice_channel: Id = 0,
     voice_mute: bool = false,
     voice_deaf: bool = false,
+    voice_video: bool = false,
+    stream_key: [96]u8 = @splat(0),
+    stream_key_len: u8 = 0,
+    stream_voice: ?*voice_mod.Voice = null,
+    stream_rtc_server: Id = 0,
+    stream_rtc_channel: Id = 0,
+    stream_endpoint: [256]u8 = @splat(0),
+    stream_endpoint_len: usize = 0,
+    stream_token: [256]u8 = @splat(0),
+    stream_token_len: usize = 0,
+    stream_cfg: video_cfg.StreamConfig = .{},
+    watch_key: [96]u8 = @splat(0),
+    watch_key_len: u8 = 0,
+    watch_voice: ?*voice_mod.Voice = null,
+    watch_rtc_server: Id = 0,
+    watch_rtc_channel: Id = 0,
+    watch_endpoint: [256]u8 = @splat(0),
+    watch_endpoint_len: usize = 0,
+    watch_token: [256]u8 = @splat(0),
+    watch_token_len: usize = 0,
+    stream_meta: [16]StreamRtcMeta = @splat(.{}),
     voice_session: [128]u8 = @splat(0),
     voice_session_len: usize = 0,
     voice_endpoint: [256]u8 = @splat(0),
@@ -205,9 +235,17 @@ pub const Gateway = struct {
     outbox: gw_budget.Outbox = .{},
     /// Já avisou no registro que a fila está esperando o teto (uma vez por aperto).
     outbox_noted: bool = false,
-    /// Envio de mensagem: o 429 volta para quem pediu em vez de esperar e tentar
-    /// de novo (vira a contagem do modo lento na caixa de texto).
+    /// Passar de 429: volta pro app na hora.
     pass_429: bool = false,
+    dm_channels: std.AutoHashMapUnmanaged(Id, Id) = .empty,
+    rc_ticket: ?remote_ctrl.LocalTicket = null,
+    rc_req_peer: Id = 0,
+    rc_req_pub: [32]u8 = @splat(0),
+    rc_req_pin: u32 = 0,
+    rc_req_pub_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    rc_req_pub_port: u16 = 0,
+    rc_req_lan_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    rc_req_lan_port: u16 = 0,
 
     pub fn start(g: *Gateway) !void {
         g.wake = sys.Wake.open();
@@ -229,6 +267,8 @@ pub const Gateway = struct {
         if (g.thread) |t| c.SDL_WaitThread(t, null);
         g.closeWakePipe();
         g.stopVoice();
+        g.clearRcTicket();
+        g.dm_channels.deinit(alloc);
         std.crypto.secureZero(u8, g.token);
         alloc.free(g.token);
         @memset(&g.session_id, 0);
@@ -767,8 +807,8 @@ pub const Gateway = struct {
             },
             .voice => |v| {
                 // Numa DM ou grupo (`guild` 0) o guild_id vai null (net/call_json.zig).
-                var out: [256]u8 = undefined;
-                const p = call_json.voiceState(&out, v.guild, v.channel, v.mute, v.deaf) orelse return true;
+                var out: [288]u8 = undefined;
+                const p = (if (v.video) |vid| call_json.voiceStateVideo(&out, v.guild, v.channel, v.mute, v.deaf, vid) else call_json.voiceState(&out, v.guild, v.channel, v.mute, v.deaf)) orelse return true;
                 std.log.debug("voz: op4 canal={d}", .{v.channel orelse 0});
                 if (!g.writeWs(p)) return false;
                 g.voice_unconfirmed = v;
@@ -1373,6 +1413,11 @@ pub const Gateway = struct {
         }
         if (std.mem.startsWith(u8, t, "INTERACTION_") or std.mem.eql(u8, t, "APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE")) return g.onInteraction(t, d);
         if (std.mem.eql(u8, t, "MESSAGE_CREATE")) {
+            const rc_raw = j.str(j.get(d, "content")) orelse "";
+            if (std.mem.startsWith(u8, rc_raw, rc_prefix)) {
+                g.handleRcSignal(d, rc_raw);
+                return;
+            }
             g.upsertUsers(d);
             if (j.get(d, "member")) |m| g.memberColor(j.id(j.get(d, "guild_id")) orelse 0, j.id(j.get(j.get(d, "author") orelse .null, "id")) orelse 0, m);
             // Quem foi mencionado vem com o membro dele: o apelido aparece na menção.
@@ -1670,6 +1715,104 @@ pub const Gateway = struct {
                 }
                 g.tryStartVoice();
             }
+            return;
+        }
+        if (std.mem.eql(u8, t, "STREAM_CREATE")) {
+            const sk = j.str(j.get(d, "stream_key")) orelse return;
+            const psk = parseStreamKey(sk);
+            const k = ev.StreamInfo.fromKey(sk);
+            const rtc_srv = j.id(j.get(d, "rtc_server_id")) orelse psk.guild;
+            const rtc_ch = j.id(j.get(d, "rtc_channel_id")) orelse 0;
+            g.saveStreamMeta(sk, rtc_srv, rtc_ch);
+            const is_mine = psk.owner != 0 and psk.owner == g.me and g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk);
+            const is_watching = g.watch_key_len > 0 and std.mem.eql(u8, g.watch_key[0..g.watch_key_len], sk);
+            if (is_mine) {
+                g.stream_rtc_server = rtc_srv;
+                g.stream_rtc_channel = rtc_ch;
+                var pb: [256]u8 = undefined;
+                if (call_json.streamSetPaused(&pb, sk, false)) |p| _ = g.writeWs(p);
+                g.tryStartStreamVoice();
+            } else if (is_watching) {
+                g.watch_rtc_server = rtc_srv;
+                g.watch_rtc_channel = rtc_ch;
+                g.tryStartWatchVoice();
+            }
+            g.emit(.{ .stream_update = .{
+                .channel = psk.channel,
+                .guild = psk.guild,
+                .owner = psk.owner,
+                .active = true,
+                .source = if (is_mine) g.stream_cfg.kind else .screen,
+                .width = if (is_mine) @intCast(g.stream_cfg.resolution.dims()[0]) else 1920,
+                .height = if (is_mine) @intCast(g.stream_cfg.resolution.dims()[1]) else 1080,
+                .fps = if (is_mine) g.stream_cfg.fps else 60,
+                .codec = if (is_mine) g.stream_cfg.codec else .h264,
+                .has_audio = if (is_mine) g.stream_cfg.share_audio else false,
+                .remote_perm = if (is_mine) g.stream_cfg.remote_perm else .off,
+                .stream_key = k.buf,
+                .stream_key_len = k.len,
+            } });
+            return;
+        }
+        if (std.mem.eql(u8, t, "STREAM_SERVER_UPDATE")) {
+            const sk = j.str(j.get(d, "stream_key")) orelse return;
+            const is_mine = g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk);
+            const is_watching = g.watch_key_len > 0 and std.mem.eql(u8, g.watch_key[0..g.watch_key_len], sk);
+            if (!is_mine and !is_watching) return;
+            if (is_mine) {
+                g.killStreamVoice();
+                g.stream_endpoint_len = 0;
+                if (j.str(j.get(d, "endpoint"))) |ep| {
+                    g.stream_endpoint_len = @min(ep.len, g.stream_endpoint.len - 1);
+                    @memcpy(g.stream_endpoint[0..g.stream_endpoint_len], ep[0..g.stream_endpoint_len]);
+                }
+                if (j.str(j.get(d, "token"))) |tk| {
+                    g.stream_token_len = @min(tk.len, g.stream_token.len - 1);
+                    @memcpy(g.stream_token[0..g.stream_token_len], tk[0..g.stream_token_len]);
+                }
+                g.tryStartStreamVoice();
+            } else if (is_watching) {
+                g.killWatchVoice();
+                g.watch_endpoint_len = 0;
+                if (j.str(j.get(d, "endpoint"))) |ep| {
+                    g.watch_endpoint_len = @min(ep.len, g.watch_endpoint.len - 1);
+                    @memcpy(g.watch_endpoint[0..g.watch_endpoint_len], ep[0..g.watch_endpoint_len]);
+                }
+                if (j.str(j.get(d, "token"))) |tk| {
+                    g.watch_token_len = @min(tk.len, g.watch_token.len - 1);
+                    @memcpy(g.watch_token[0..g.watch_token_len], tk[0..g.watch_token_len]);
+                }
+                g.tryStartWatchVoice();
+            }
+            return;
+        }
+        if (std.mem.eql(u8, t, "STREAM_DELETE")) {
+            const sk = j.str(j.get(d, "stream_key")) orelse return;
+            const psk = parseStreamKey(sk);
+            const k = ev.StreamInfo.fromKey(sk);
+            g.removeStreamMeta(sk);
+            if (g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk)) {
+                g.killStreamVoice();
+                g.stream_key_len = 0;
+                g.stream_endpoint_len = 0;
+                std.crypto.secureZero(u8, &g.stream_token);
+                g.stream_token_len = 0;
+            }
+            if (g.watch_key_len > 0 and std.mem.eql(u8, g.watch_key[0..g.watch_key_len], sk)) {
+                g.killWatchVoice();
+                g.watch_key_len = 0;
+                g.watch_endpoint_len = 0;
+                std.crypto.secureZero(u8, &g.watch_token);
+                g.watch_token_len = 0;
+            }
+            g.emit(.{ .stream_update = .{
+                .channel = psk.channel,
+                .guild = psk.guild,
+                .owner = psk.owner,
+                .active = false,
+                .stream_key = k.buf,
+                .stream_key_len = k.len,
+            } });
             return;
         }
         // Calls de DM e grupo: quem está tocando e quem já está na call.
@@ -1971,6 +2114,9 @@ pub const Gateway = struct {
         if (name.len == 0) name = "?";
 
         const parent = j.id(j.get(cv, "parent_id")) orelse 0;
+        if (kind_i == 1 and recipient != 0) {
+            g.dm_channels.put(alloc, recipient, cid) catch {};
+        }
         const pos: u16 = @intCast(std.math.clamp(j.int(j.get(cv, "position")) orelse 0, 0, 65535));
         return .{
             .id = cid,
@@ -2192,6 +2338,7 @@ pub const Gateway = struct {
             return out;
         };
         const raw_text = j.str(j.get(m, "content")) orelse "";
+        if (std.mem.startsWith(u8, raw_text, rc_prefix)) return null;
         var content = try j.simplifyContent(alloc, raw_text);
         errdefer alloc.free(content);
         const raw: []const u8 = if (content.len != raw_text.len) try alloc.dupe(u8, raw_text) else "";
@@ -3038,7 +3185,7 @@ pub const Gateway = struct {
     /// Comando que é escrito no WebSocket (não passa pelo REST).
     fn usesGateway(cmd: ev.Command) bool {
         return switch (cmd) {
-            .subscribe_guild, .channel_info, .set_status, .set_activity, .set_game, .join_voice, .voice_flags => true,
+            .subscribe_guild, .channel_info, .set_status, .set_activity, .set_game, .join_voice, .voice_flags, .start_video, .stop_video, .start_stream, .stop_stream, .watch_stream => true,
             // Os eventos da interação vão para a sessão do READY (session_id).
             .interaction => |ic| ic == .send,
             else => false,
@@ -3799,6 +3946,7 @@ pub const Gateway = struct {
             .deaf = on(vs, "deaf"),
             .suppress = on(vs, "suppress"),
             .self_stream = on(vs, "self_stream"),
+            .self_video = on(vs, "self_video"),
         };
     }
 
@@ -3816,7 +3964,13 @@ pub const Gateway = struct {
     /// Op 4 do gateway principal: entra/sai do canal de voz (numa DM ou
     /// grupo, `guild_id` vai null).
     fn sendVoiceState(g: *Gateway, channel: ?Id) void {
-        g.queueOp(.{ .voice = .{ .guild = g.voice_guild, .channel = channel, .mute = g.voice_mute, .deaf = g.voice_deaf } });
+        g.queueOp(.{ .voice = .{
+            .guild = g.voice_guild,
+            .channel = channel,
+            .mute = g.voice_mute,
+            .deaf = g.voice_deaf,
+            .video = if (channel != null and g.voice_video) true else null,
+        } });
     }
 
     /// O gateway de voz só abre quando já temos endpoint, token e session_id.
@@ -3841,7 +3995,12 @@ pub const Gateway = struct {
         while (it.next()) |kv| vc.setVolume(kv.key_ptr.*, kv.value_ptr.*);
         var dit = g.voice_dsp.iterator();
         while (dit.next()) |kv| vc.setDsp(kv.key_ptr.*, kv.value_ptr.*);
+        if (g.voice_video) {
+            vc.setVideoEnabled(true, .h264, 1920, 1080, 30, 3500);
+            voice_mod.media_bridge.bind(false, vc);
+        }
         vc.start() catch {
+            voice_mod.media_bridge.unbindIfEq(false, vc);
             vc.deinit();
             alloc.destroy(vc);
             g.emit(.{ .voice_status = .{ .status = .disconnected, .channel = g.voice_channel } });
@@ -3854,6 +4013,7 @@ pub const Gateway = struct {
     /// Para a thread de voz mas guarda o que precisa para abrir de novo.
     fn killVoice(g: *Gateway) void {
         if (g.voice) |vc| {
+            voice_mod.media_bridge.unbindIfEq(false, vc);
             vc.stop();
             vc.deinit();
             alloc.destroy(vc);
@@ -3861,10 +4021,312 @@ pub const Gateway = struct {
         }
     }
 
+    fn parseStreamKey(sk: []const u8) struct { guild: Id = 0, channel: Id = 0, owner: Id = 0 } {
+        var it = std.mem.splitScalar(u8, sk, ':');
+        const kind = it.next() orelse return .{};
+        if (std.mem.eql(u8, kind, "guild")) {
+            return .{
+                .guild = std.fmt.parseInt(Id, it.next() orelse "", 10) catch 0,
+                .channel = std.fmt.parseInt(Id, it.next() orelse "", 10) catch 0,
+                .owner = std.fmt.parseInt(Id, it.next() orelse "", 10) catch 0,
+            };
+        }
+        return .{
+            .channel = std.fmt.parseInt(Id, it.next() orelse "", 10) catch 0,
+            .owner = std.fmt.parseInt(Id, it.next() orelse "", 10) catch 0,
+        };
+    }
+
+    fn saveStreamMeta(g: *Gateway, sk: []const u8, rtc_srv: Id, rtc_ch: Id) void {
+        if (sk.len == 0 or sk.len > 96) return;
+        for (&g.stream_meta) |*m| {
+            if (m.len == sk.len and std.mem.eql(u8, m.key[0..m.len], sk)) {
+                m.rtc_server = rtc_srv;
+                m.rtc_channel = rtc_ch;
+                return;
+            }
+        }
+        for (&g.stream_meta) |*m| {
+            if (m.len == 0) {
+                @memcpy(m.key[0..sk.len], sk);
+                m.len = @intCast(sk.len);
+                m.rtc_server = rtc_srv;
+                m.rtc_channel = rtc_ch;
+                return;
+            }
+        }
+        @memcpy(g.stream_meta[0].key[0..sk.len], sk);
+        g.stream_meta[0].len = @intCast(sk.len);
+        g.stream_meta[0].rtc_server = rtc_srv;
+        g.stream_meta[0].rtc_channel = rtc_ch;
+    }
+
+    fn lookupStreamMeta(g: *const Gateway, sk: []const u8) ?struct { rtc_server: Id, rtc_channel: Id } {
+        for (&g.stream_meta) |*m| {
+            if (m.len == sk.len and std.mem.eql(u8, m.key[0..m.len], sk)) {
+                return .{ .rtc_server = m.rtc_server, .rtc_channel = m.rtc_channel };
+            }
+        }
+        return null;
+    }
+
+    fn removeStreamMeta(g: *Gateway, sk: []const u8) void {
+        for (&g.stream_meta) |*m| {
+            if (m.len == sk.len and std.mem.eql(u8, m.key[0..m.len], sk)) {
+                m.* = .{};
+            }
+        }
+    }
+
+    fn tryStartStreamVoice(g: *Gateway) void {
+        if (sys.web) return;
+        if (g.stream_voice != null or g.stream_key_len == 0 or g.voice_channel == 0 or g.me == 0) return;
+        if (g.stream_endpoint_len == 0 or g.stream_token_len == 0 or g.voice_session_len == 0) return;
+        const sv = alloc.create(voice_mod.Voice) catch return;
+        const rtc_srv = if (g.stream_rtc_server != 0) g.stream_rtc_server else g.voice_guild;
+        const rtc_ch = if (g.stream_rtc_channel != 0 and g.stream_rtc_channel != g.voice_channel)
+            g.stream_rtc_channel
+        else if (rtc_srv > 0)
+            rtc_srv -% 1
+        else
+            g.voice_channel;
+        sv.* = voice_mod.Voice.init(
+            g.sink,
+            rtc_srv,
+            rtc_ch,
+            g.me,
+            g.stream_endpoint[0..g.stream_endpoint_len],
+            g.stream_token[0..g.stream_token_len],
+            g.voice_session[0..g.voice_session_len],
+            false,
+            false,
+        );
+        sv.setStreamMode(g.stream_key[0..g.stream_key_len]);
+        const dims = g.stream_cfg.resolution.dims();
+        const eff_codec: video_cfg.Codec = if (g.stream_cfg.codec == .auto) .h264 else g.stream_cfg.codec;
+        sv.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), g.stream_cfg.fps, g.stream_cfg.bitrate_kbps);
+        voice_mod.media_bridge.bind(true, sv);
+        sv.start() catch {
+            voice_mod.media_bridge.unbindIfEq(true, sv);
+            sv.deinit();
+            alloc.destroy(sv);
+            return;
+        };
+        g.stream_voice = sv;
+    }
+
+    fn tryStartWatchVoice(g: *Gateway) void {
+        if (sys.web) return;
+        if (g.watch_voice != null or g.watch_key_len == 0 or g.voice_channel == 0 or g.me == 0) return;
+        if (g.watch_endpoint_len == 0 or g.watch_token_len == 0 or g.voice_session_len == 0) return;
+        const wv = alloc.create(voice_mod.Voice) catch return;
+        const rtc_srv = if (g.watch_rtc_server != 0) g.watch_rtc_server else g.voice_guild;
+        const rtc_ch = if (g.watch_rtc_channel != 0 and g.watch_rtc_channel != g.voice_channel)
+            g.watch_rtc_channel
+        else if (rtc_srv > 0)
+            rtc_srv -% 1
+        else
+            g.voice_channel;
+        wv.* = voice_mod.Voice.init(
+            g.sink,
+            rtc_srv,
+            rtc_ch,
+            g.me,
+            g.watch_endpoint[0..g.watch_endpoint_len],
+            g.watch_token[0..g.watch_token_len],
+            g.voice_session[0..g.voice_session_len],
+            true,
+            false,
+        );
+        wv.setStreamMode(g.watch_key[0..g.watch_key_len]);
+        wv.start() catch {
+            wv.deinit();
+            alloc.destroy(wv);
+            return;
+        };
+        g.watch_voice = wv;
+    }
+
+    const rc_prefix = "!lrpc-rc:1:";
+
+    fn clearRcTicket(g: *Gateway) void {
+        if (g.rc_ticket) |*tk| {
+            if (sys.valid(tk.sock)) sys.closeSocket(tk.sock);
+            std.crypto.secureZero(u8, &tk.secret_key);
+            g.rc_ticket = null;
+        }
+    }
+
+    fn fmtRcEndpointMsg(
+        buf: []u8,
+        kind: []const u8,
+        target: Id,
+        perm: video_cfg.RemotePerm,
+        pin: u32,
+        pub_key: [32]u8,
+        pub_ip: [4]u8,
+        pub_port: u16,
+        lan_ip: [4]u8,
+        lan_port: u16,
+    ) ?[]const u8 {
+        var b64: [44]u8 = undefined;
+        const pub_s = std.base64.standard.Encoder.encode(&b64, &pub_key);
+        return std.fmt.bufPrint(
+            buf,
+            "{s}{s}:{d}:{d}:{d}:{s}:{d}.{d}.{d}.{d}:{d}:{d}.{d}.{d}.{d}:{d}",
+            .{
+                rc_prefix,
+                kind,
+                target,
+                @intFromEnum(perm),
+                pin,
+                pub_s,
+                pub_ip[0],
+                pub_ip[1],
+                pub_ip[2],
+                pub_ip[3],
+                pub_port,
+                lan_ip[0],
+                lan_ip[1],
+                lan_ip[2],
+                lan_ip[3],
+                lan_port,
+            },
+        ) catch null;
+    }
+
+    fn parseIp4Tuple(s: []const u8) ?[4]u8 {
+        var it = std.mem.splitScalar(u8, s, '.');
+        var out: [4]u8 = undefined;
+        for (0..4) |i| {
+            const part = it.next() orelse return null;
+            out[i] = std.fmt.parseInt(u8, part, 10) catch return null;
+        }
+        if (it.next() != null) return null;
+        return out;
+    }
+
+    fn ensureRcDmChannel(g: *Gateway, user: Id) Id {
+        if (user == 0) return 0;
+        if (g.dm_channels.get(user)) |cid| return cid;
+        var b: [64]u8 = undefined;
+        const body = std.fmt.bufPrint(&b, "{{\"recipients\":[\"{d}\"]}}", .{user}) catch return 0;
+        var resp = g.request("POST", "/users/@me/channels", body) orelse return 0;
+        defer resp.body.deinit(alloc);
+        if (resp.status >= 300) return 0;
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const v = std.json.parseFromSliceLeaky(Value, arena.allocator(), resp.body.items, .{}) catch return 0;
+        const cid = j.id(j.get(v, "id")) orelse return 0;
+        g.dm_channels.put(alloc, user, cid) catch {};
+        return cid;
+    }
+
+    fn sendRcDmText(g: *Gateway, user: Id, text: []const u8) bool {
+        const cid = g.ensureRcDmChannel(user);
+        if (cid == 0) return false;
+        var b: std.ArrayList(u8) = .empty;
+        defer b.deinit(alloc);
+        b.appendSlice(alloc, "{\"content\":") catch return false;
+        j.writeString(&b, alloc, text) catch return false;
+        b.appendSlice(alloc, "}") catch return false;
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/channels/{d}/messages", .{cid}) catch return false;
+        var resp = g.request("POST", path, b.items) orelse return false;
+        defer resp.body.deinit(alloc);
+        return resp.status < 300;
+    }
+
+    fn handleRcSignal(g: *Gateway, d: Value, raw: []const u8) void {
+        const author = user_json.authorId(d);
+        if (author == 0 or author == g.me) return;
+        const rest = raw[rc_prefix.len..];
+        var it = std.mem.splitScalar(u8, rest, ':');
+        const kind = it.next() orelse return;
+        const target = std.fmt.parseInt(Id, it.next() orelse "", 10) catch return;
+        if (target != g.me) return;
+
+        if (std.mem.eql(u8, kind, "STOP")) {
+            remote_ctrl.mgr.stop();
+            g.clearRcTicket();
+            g.rc_req_peer = 0;
+            g.emit(.{ .remote_ctrl_state = .{ .peer = author, .status = .idle, .perm = .off } });
+            return;
+        }
+        const perm_u = std.fmt.parseInt(u8, it.next() orelse "", 10) catch return;
+        const perm = std.enums.fromInt(video_cfg.RemotePerm, perm_u) orelse return;
+        const pin = std.fmt.parseInt(u32, it.next() orelse "", 10) catch return;
+        const pub_b64 = it.next() orelse return;
+        var peer_pub: [32]u8 = undefined;
+        std.base64.standard.Decoder.decode(&peer_pub, pub_b64) catch return;
+        const pub_ip = parseIp4Tuple(it.next() orelse "") orelse return;
+        const pub_port = std.fmt.parseInt(u16, it.next() orelse "", 10) catch return;
+        const lan_ip = parseIp4Tuple(it.next() orelse "") orelse .{ 0, 0, 0, 0 };
+        const lan_port = std.fmt.parseInt(u16, it.next() orelse "", 10) catch 0;
+
+        if (std.mem.eql(u8, kind, "REQ")) {
+            g.rc_req_peer = author;
+            g.rc_req_pub = peer_pub;
+            g.rc_req_pin = pin;
+            g.rc_req_pub_ip = pub_ip;
+            g.rc_req_pub_port = pub_port;
+            g.rc_req_lan_ip = lan_ip;
+            g.rc_req_lan_port = lan_port;
+            g.emit(.{ .remote_ctrl_request = .{ .peer = author, .perm = perm } });
+        } else if (std.mem.eql(u8, kind, "ACC")) {
+            var tk = g.rc_ticket orelse return;
+            if (tk.pin != pin) return;
+            g.rc_ticket = null;
+            var pub_z: [24]u8 = @splat(0);
+            const pub_s = std.fmt.bufPrint(&pub_z, "{d}.{d}.{d}.{d}", .{ pub_ip[0], pub_ip[1], pub_ip[2], pub_ip[3] }) catch {
+                sys.closeSocket(tk.sock);
+                std.crypto.secureZero(u8, &tk.secret_key);
+                return;
+            };
+            pub_z[pub_s.len] = 0;
+            const pub_ip_z: [:0]const u8 = pub_z[0..pub_s.len :0];
+            if (remote_ctrl.mgr.startViewer(tk.sock, tk.secret_key, peer_pub, tk.pin, pub_ip_z.ptr, pub_port)) |_| {
+                remote_ctrl.mgr.setAltEndpoint(lan_ip, lan_port);
+                g.emit(.{ .remote_ctrl_state = .{ .peer = author, .status = .active_viewer, .perm = perm } });
+            } else |_| {
+                sys.closeSocket(tk.sock);
+                g.emit(.{ .remote_ctrl_state = .{ .peer = author, .status = .denied, .perm = .off } });
+            }
+            std.crypto.secureZero(u8, &tk.secret_key);
+        }
+    }
+
+    fn killStreamVoice(g: *Gateway) void {
+        if (g.stream_voice) |sv| {
+            voice_mod.media_bridge.unbindIfEq(true, sv);
+            sv.stop();
+            sv.deinit();
+            alloc.destroy(sv);
+            g.stream_voice = null;
+        }
+    }
+
+    fn killWatchVoice(g: *Gateway) void {
+        if (g.watch_voice) |wv| {
+            wv.stop();
+            wv.deinit();
+            alloc.destroy(wv);
+            g.watch_voice = null;
+        }
+    }
+
     /// Recolhe a thread de voz que terminou sozinha. Movido (4014): espera
     /// o servidor novo por alguns segundos; se não vier, tenta de novo com o
     /// que tem e, na falha, avisa que caiu.
     fn voiceTick(g: *Gateway) void {
+        if (g.stream_voice) |sv| switch (sv.ended.load(.acquire)) {
+            .running => {},
+            .stopped, .moved, .fatal => g.killStreamVoice(),
+        };
+        if (g.watch_voice) |wv| switch (wv.ended.load(.acquire)) {
+            .running => {},
+            .stopped, .moved, .fatal => g.killWatchVoice(),
+        };
         if (g.voice) |vc| switch (vc.ended.load(.acquire)) {
             .running => return,
             .moved => {
@@ -3909,6 +4371,21 @@ pub const Gateway = struct {
     }
 
     fn stopVoice(g: *Gateway) void {
+        g.killWatchVoice();
+        g.watch_key_len = 0;
+        g.watch_rtc_server = 0;
+        g.watch_rtc_channel = 0;
+        g.watch_endpoint_len = 0;
+        std.crypto.secureZero(u8, &g.watch_token);
+        g.watch_token_len = 0;
+        g.stream_meta = @splat(.{});
+        g.killStreamVoice();
+        g.stream_key_len = 0;
+        g.stream_rtc_server = 0;
+        g.stream_rtc_channel = 0;
+        g.stream_endpoint_len = 0;
+        std.crypto.secureZero(u8, &g.stream_token);
+        g.stream_token_len = 0;
         g.killVoice();
         g.voice_wait_until = 0;
         g.voice_moved.clear();
@@ -4579,6 +5056,8 @@ pub const Gateway = struct {
                     g.voice_token_len = 0;
                     if (g.me != 0) g.sendVoiceState(ch);
                 } else {
+                    g.voice_video = false;
+                    g.stream_key_len = 0;
                     if (g.me != 0) g.sendVoiceState(null);
                     g.stopVoice();
                     g.voice_channel = 0;
@@ -4599,6 +5078,166 @@ pub const Gateway = struct {
                 if (dsp.denoise or dsp.level) g.voice_dsp.put(alloc, v.user, dsp) catch {} else _ = g.voice_dsp.remove(v.user);
                 if (g.voice) |vc| vc.setDsp(v.user, dsp);
             },
+            .start_video => |v| {
+                g.voice_video = true;
+                const dims = v.resolution.dims();
+                const fps: u8 = if (v.fps >= 45) 60 else 30;
+                const eff_codec: video_cfg.Codec = if (v.codec == .auto) .h264 else v.codec;
+                if (g.voice) |vc| {
+                    vc.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), fps, v.resolution.defaultBitrateKbps(fps));
+                    voice_mod.media_bridge.bind(false, vc);
+                }
+                if (g.voice_channel != 0) g.queueOp(.{ .voice = .{ .guild = g.voice_guild, .channel = g.voice_channel, .mute = g.voice_mute, .deaf = g.voice_deaf, .video = true } });
+            },
+            .stop_video => {
+                g.voice_video = false;
+                if (g.voice) |vc| {
+                    vc.setVideoEnabled(false, .h264, 1920, 1080, 30, 3500);
+                    voice_mod.media_bridge.unbindIfEq(false, vc);
+                }
+                if (g.voice_channel != 0) g.queueOp(.{ .voice = .{ .guild = g.voice_guild, .channel = g.voice_channel, .mute = g.voice_mute, .deaf = g.voice_deaf, .video = false } });
+            },
+            .start_stream => |cfg| {
+                if (g.voice_channel != 0) {
+                    g.killStreamVoice();
+                    g.stream_cfg = cfg;
+                    g.stream_rtc_server = 0;
+                    g.stream_rtc_channel = 0;
+                    g.stream_endpoint_len = 0;
+                    g.stream_token_len = 0;
+                    var buf: [256]u8 = undefined;
+                    if (call_json.streamCreate(&buf, g.voice_guild, g.voice_channel)) |p| _ = g.writeWs(p);
+                    const dims = cfg.resolution.dims();
+                    const sk = if (g.voice_guild != 0)
+                        std.fmt.bufPrint(&g.stream_key, "guild:{d}:{d}:{d}", .{ g.voice_guild, g.voice_channel, g.me }) catch ""
+                    else
+                        std.fmt.bufPrint(&g.stream_key, "call:{d}:{d}", .{ g.voice_channel, g.me }) catch "";
+                    g.stream_key_len = @intCast(sk.len);
+                    const k = ev.StreamInfo.fromKey(sk);
+                    g.emit(.{ .stream_update = .{
+                        .channel = g.voice_channel,
+                        .guild = g.voice_guild,
+                        .owner = g.me,
+                        .active = true,
+                        .source = cfg.kind,
+                        .width = @intCast(dims[0]),
+                        .height = @intCast(dims[1]),
+                        .fps = cfg.fps,
+                        .codec = cfg.codec,
+                        .has_audio = cfg.share_audio,
+                        .remote_perm = cfg.remote_perm,
+                        .stream_key = k.buf,
+                        .stream_key_len = k.len,
+                    } });
+                }
+            },
+            .stop_stream => {
+                g.killStreamVoice();
+                if (g.stream_key_len > 0) {
+                    var buf: [256]u8 = undefined;
+                    if (call_json.streamDelete(&buf, g.stream_key[0..g.stream_key_len])) |p| _ = g.writeWs(p);
+                }
+                g.stream_key_len = 0;
+                g.stream_rtc_server = 0;
+                g.stream_rtc_channel = 0;
+                g.stream_endpoint_len = 0;
+                std.crypto.secureZero(u8, &g.stream_token);
+                g.stream_token_len = 0;
+                if (g.me != 0) g.emit(.{ .stream_update = .{ .channel = g.voice_channel, .guild = g.voice_guild, .owner = g.me, .active = false } });
+            },
+            .watch_stream => |ws| {
+                var key_buf: [96]u8 = undefined;
+                const sk = if (ws.guild != 0)
+                    std.fmt.bufPrint(&key_buf, "guild:{d}:{d}:{d}", .{ ws.guild, ws.channel, ws.owner }) catch ""
+                else
+                    std.fmt.bufPrint(&key_buf, "call:{d}:{d}", .{ ws.channel, ws.owner }) catch "";
+                var buf: [256]u8 = undefined;
+                if (ws.watch) {
+                    g.killWatchVoice();
+                    const meta = g.lookupStreamMeta(sk);
+                    g.watch_rtc_server = if (meta) |m| m.rtc_server else ws.guild;
+                    g.watch_rtc_channel = if (meta) |m| m.rtc_channel else 0;
+                    g.watch_endpoint_len = 0;
+                    g.watch_token_len = 0;
+                    g.watch_key_len = @intCast(@min(sk.len, g.watch_key.len - 1));
+                    @memcpy(g.watch_key[0..g.watch_key_len], sk[0..g.watch_key_len]);
+                    if (call_json.streamWatch(&buf, sk)) |p| _ = g.writeWs(p);
+                } else {
+                    g.killWatchVoice();
+                    g.watch_key_len = 0;
+                    g.watch_rtc_server = 0;
+                    g.watch_rtc_channel = 0;
+                    g.watch_endpoint_len = 0;
+                    std.crypto.secureZero(u8, &g.watch_token);
+                    g.watch_token_len = 0;
+                    const is_own_stream = g.stream_key_len > 0 and std.mem.eql(u8, sk, g.stream_key[0..g.stream_key_len]);
+                    if (!is_own_stream) {
+                        if (call_json.streamDelete(&buf, sk)) |p| _ = g.writeWs(p);
+                    }
+                }
+            },
+            .remote_ctrl_request => |rc| {
+                g.clearRcTicket();
+                if (remote_ctrl.prepareAutoTicket(450)) |tk| {
+                    g.rc_ticket = tk;
+                    var msg_buf: [256]u8 = undefined;
+                    if (fmtRcEndpointMsg(&msg_buf, "REQ", rc.peer, rc.perm, tk.pin, tk.public_key, tk.pub_ip4, tk.pub_port, tk.lan_ip4, tk.local_port)) |sig| {
+                        if (!g.sendRcDmText(rc.peer, sig)) {
+                            g.clearRcTicket();
+                            g.emit(.{ .remote_ctrl_state = .{ .peer = rc.peer, .status = .denied, .perm = .off } });
+                        }
+                    } else {
+                        g.clearRcTicket();
+                    }
+                } else {
+                    g.emit(.{ .remote_ctrl_state = .{ .peer = rc.peer, .status = .denied, .perm = .off } });
+                }
+            },
+            .remote_ctrl_respond => |rr| {
+                if (rr.perm == .off) {
+                    g.rc_req_peer = 0;
+                    var sb: [96]u8 = undefined;
+                    if (std.fmt.bufPrint(&sb, "{s}STOP:{d}", .{ rc_prefix, rr.peer })) |sig| {
+                        _ = g.sendRcDmText(rr.peer, sig);
+                    } else |_| {}
+                    return;
+                }
+                if (g.rc_req_peer != rr.peer or rr.peer == 0) return;
+                if (remote_ctrl.prepareAutoTicket(450)) |tk_in| {
+                    var tk = tk_in;
+                    var pub_z: [24]u8 = @splat(0);
+                    const pub_s = std.fmt.bufPrint(&pub_z, "{d}.{d}.{d}.{d}", .{ g.rc_req_pub_ip[0], g.rc_req_pub_ip[1], g.rc_req_pub_ip[2], g.rc_req_pub_ip[3] }) catch {
+                        sys.closeSocket(tk.sock);
+                        std.crypto.secureZero(u8, &tk.secret_key);
+                        return;
+                    };
+                    pub_z[pub_s.len] = 0;
+                    const pub_ip_z: [:0]const u8 = pub_z[0..pub_s.len :0];
+                    if (remote_ctrl.mgr.startHost(tk.sock, tk.secret_key, g.rc_req_pub, g.rc_req_pin, pub_ip_z.ptr, g.rc_req_pub_port, rr.perm, 0)) |_| {
+                        remote_ctrl.mgr.setAltEndpoint(g.rc_req_lan_ip, g.rc_req_lan_port);
+                        var msg_buf: [256]u8 = undefined;
+                        if (fmtRcEndpointMsg(&msg_buf, "ACC", rr.peer, rr.perm, g.rc_req_pin, tk.public_key, tk.pub_ip4, tk.pub_port, tk.lan_ip4, tk.local_port)) |sig| {
+                            _ = g.sendRcDmText(rr.peer, sig);
+                        }
+                        g.emit(.{ .remote_ctrl_state = .{ .peer = rr.peer, .status = .active_host, .perm = rr.perm } });
+                    } else |_| {
+                        sys.closeSocket(tk.sock);
+                    }
+                    std.crypto.secureZero(u8, &tk.secret_key);
+                }
+            },
+            .remote_ctrl_stop => |peer| {
+                remote_ctrl.mgr.stop();
+                g.clearRcTicket();
+                g.rc_req_peer = 0;
+                if (peer != 0) {
+                    var sb: [96]u8 = undefined;
+                    if (std.fmt.bufPrint(&sb, "{s}STOP:{d}", .{ rc_prefix, peer })) |sig| {
+                        _ = g.sendRcDmText(peer, sig);
+                    } else |_| {}
+                }
+            },
+            .remote_ctrl_input => {},
             .call_ring => |ch| {
                 const path = std.fmt.bufPrint(&path_buf, "/channels/{d}/call/ring", .{ch}) catch return;
                 var resp = g.request("POST", path, call_json.ring_body) orelse return;

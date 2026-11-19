@@ -70,6 +70,10 @@ pub fn valid(s: Socket) bool {
 extern fn OPENSSL_init_crypto(opts: u64, settings: ?*const anyopaque) c_int;
 const openssl_init_no_load_config: u64 = 0x80;
 
+const WinTimePeriodFn = *const fn (u32) callconv(.winapi) u32;
+var win_begin_period: ?WinTimePeriodFn = null;
+var win_end_period: ?WinTimePeriodFn = null;
+
 /// Uma vez, antes de qualquer outra coisa.
 pub fn init() void {
     if (windows) {
@@ -80,9 +84,36 @@ pub fn init() void {
         _ = OPENSSL_init_crypto(openssl_init_no_load_config, null);
         var data: c.WSADATA = undefined;
         _ = c.WSAStartup(0x0202, &data);
+        if (c.SDL_LoadObject("winmm.dll")) |wm| {
+            win_begin_period = @ptrCast(@alignCast(c.SDL_LoadFunction(wm, "timeBeginPeriod")));
+            win_end_period = @ptrCast(@alignCast(c.SDL_LoadFunction(wm, "timeEndPeriod")));
+        }
     } else {
         // Um filho (secret-tool) ou pipe fechado vira erro de write, não a morte do app.
         _ = c.signal(c.SIGPIPE, c.SIG_IGN);
+    }
+}
+
+pub fn beginHiResTimer() void {
+    if (windows) if (win_begin_period) |f| {
+        _ = f(1);
+    };
+}
+
+pub fn endHiResTimer() void {
+    if (windows) if (win_end_period) |f| {
+        _ = f(1);
+    };
+}
+
+pub fn bumpUdpBufs(s: Socket, bytes: c_int) void {
+    if (!valid(s)) return;
+    if (windows) {
+        _ = c.setsockopt(s, c.SOL_SOCKET, c.SO_RCVBUF, @ptrCast(&bytes), @sizeOf(c_int));
+        _ = c.setsockopt(s, c.SOL_SOCKET, c.SO_SNDBUF, @ptrCast(&bytes), @sizeOf(c_int));
+    } else {
+        _ = c.setsockopt(s, c.SOL_SOCKET, c.SO_RCVBUF, @ptrCast(&bytes), @sizeOf(c_int));
+        _ = c.setsockopt(s, c.SOL_SOCKET, c.SO_SNDBUF, @ptrCast(&bytes), @sizeOf(c_int));
     }
 }
 
@@ -113,9 +144,53 @@ pub fn recvNow(s: Socket, buf: []u8) isize {
     return c.recv(s, buf.ptr, buf.len, c.MSG_DONTWAIT);
 }
 
+pub fn recvFrom(s: Socket, buf: []u8, out_from: *SockAddrIn) isize {
+    out_from.* = std.mem.zeroes(SockAddrIn);
+    if (windows) {
+        var flen: c_int = @sizeOf(SockAddrIn);
+        return c.recvfrom(s, buf.ptr, @intCast(buf.len), 0, @ptrCast(out_from), &flen);
+    }
+    var flen: c.socklen_t = @sizeOf(SockAddrIn);
+    return c.recvfrom(s, buf.ptr, buf.len, c.MSG_DONTWAIT, @ptrCast(out_from), &flen);
+}
+
 pub fn sendTo(s: Socket, data: []const u8, to: *const SockAddrIn) isize {
     if (windows) return c.sendto(s, data.ptr, @intCast(data.len), 0, @ptrCast(to), @sizeOf(SockAddrIn));
     return c.sendto(s, data.ptr, data.len, 0, @ptrCast(to), @sizeOf(SockAddrIn));
+}
+
+pub fn discoverLanIp4() [4]u8 {
+    const s = udpSocket() orelse return .{ 0, 0, 0, 0 };
+    defer closeSocket(s);
+    const dst = ipv4("1.1.1.1", 53) orelse return .{ 0, 0, 0, 0 };
+    if (c.connect(s, @ptrCast(&dst), @sizeOf(SockAddrIn)) != 0) return .{ 0, 0, 0, 0 };
+    var local = std.mem.zeroes(SockAddrIn);
+    if (windows) {
+        var slen: c_int = @sizeOf(SockAddrIn);
+        if (c.getsockname(s, @ptrCast(&local), &slen) != 0) return .{ 0, 0, 0, 0 };
+    } else {
+        var slen: c.socklen_t = @sizeOf(SockAddrIn);
+        if (c.getsockname(s, @ptrCast(&local), &slen) != 0) return .{ 0, 0, 0, 0 };
+    }
+    return @as(*const [4]u8, @ptrCast(&local.sin_addr)).*;
+}
+
+pub fn resolveHostIp4(host: [*:0]const u8) ?[4]u8 {
+    if (!windows) return null;
+    var hints = std.mem.zeroes(c.struct_addrinfo);
+    hints.ai_family = c.AF_INET;
+    hints.ai_socktype = c.SOCK_DGRAM;
+    var res: ?*c.struct_addrinfo = null;
+    if (c.getaddrinfo(host, null, &hints, &res) != 0 or res == null) return null;
+    defer c.freeaddrinfo(res);
+    var cur = res;
+    while (cur) |node| : (cur = node.ai_next) {
+        if (node.ai_family == c.AF_INET and node.ai_addr != null and node.ai_addrlen >= @sizeOf(SockAddrIn)) {
+            const sa: *const SockAddrIn = @ptrCast(@alignCast(node.ai_addr.?));
+            return @as(*const [4]u8, @ptrCast(&sa.sin_addr)).*;
+        }
+    }
+    return null;
 }
 
 pub fn bindAny(s: Socket) bool {

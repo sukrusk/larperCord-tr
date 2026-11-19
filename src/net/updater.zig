@@ -14,8 +14,8 @@ const proxy = @import("proxy.zig");
 const alloc = std.heap.c_allocator;
 
 pub const current: []const u8 = build_options.version;
-const latest_url = "https://api.github.com/repos/RshaCuDeVidro/larperCord/releases/latest";
-pub const releases_page = "https://github.com/RshaCuDeVidro/larperCord/releases";
+const latest_url = "https://api.github.com/repos/sukrusk/larperCord-tr/releases/latest";
+pub const releases_page = "https://github.com/sukrusk/larperCord-tr/releases";
 
 /// Arquivos publicados desta plataforma e onde cada um fica (core/atualizacao.zig).
 const files = at.files(sys.windows, build_options.single_exe);
@@ -52,8 +52,9 @@ pub var offline = false;
 var wake_fn: ?*const fn () void = null;
 /// Aviso de "tem versão nova" que a interface ainda não mostrou.
 var notice_pending = std.atomic.Value(bool).init(false);
-/// Links dos arquivos da última resposta (nome -> URL).
-var assets: std.StringHashMapUnmanaged([]u8) = .empty;
+/// Metadados de cada asset publicado no GitHub Releases.
+const Asset = struct { url: []u8, digest: ?[32]u8 = null };
+var assets: std.StringHashMapUnmanaged(Asset) = .empty;
 
 pub fn setup(wake: *const fn () void) void {
     wake_fn = wake;
@@ -203,7 +204,7 @@ fn runCheck() !void {
     var it = assets.iterator();
     while (it.next()) |e| {
         alloc.free(e.key_ptr.*);
-        alloc.free(e.value_ptr.*);
+        alloc.free(e.value_ptr.url);
     }
     assets.clearRetainingCapacity();
     if (v.object.get("assets")) |list| if (list == .array) for (list.array.items) |a| {
@@ -211,9 +212,13 @@ fn runCheck() !void {
         const name = a.object.get("name") orelse continue;
         const url = a.object.get("browser_download_url") orelse continue;
         if (name != .string or url != .string) continue;
+        const digest: ?[32]u8 = if (a.object.get("digest")) |dg|
+            if (dg == .string) version.parseSha256Hex(dg.string) else null
+        else
+            null;
         const nk = try alloc.dupe(u8, name.string);
         const uk = try alloc.dupe(u8, url.string);
-        try assets.put(alloc, nk, uk);
+        try assets.put(alloc, nk, .{ .url = uk, .digest = digest });
     };
     const m = mutex orelse return;
     c.SDL_LockMutex(m);
@@ -227,9 +232,17 @@ fn runCheck() !void {
     } else set(.up_to_date, .none, 0);
 }
 
+fn findAsset(name: []const u8, allow_exe_fallback: bool) ?struct { name: []const u8, info: Asset } {
+    if (assets.get(name)) |info| return .{ .name = name, .info = info };
+    if (allow_exe_fallback and sys.windows and assets.get("larpercord.exe") != null) {
+        return .{ .name = "larpercord.exe", .info = assets.get("larpercord.exe").? };
+    }
+    return null;
+}
+
 fn assetUrl(buf: []u8, name: []const u8) ![:0]const u8 {
-    const u = assets.get(name) orelse return error.NoRelease;
-    return std.fmt.bufPrintSentinel(buf, "{s}", .{u}, 0) catch error.NoRelease;
+    const a = findAsset(name, false) orelse return error.NoRelease;
+    return std.fmt.bufPrintSentinel(buf, "{s}", .{a.info.url}, 0) catch error.NoRelease;
 }
 
 /// Instalado por um gerenciador de pacotes (a pasta do programa não é de quem usa): é ele quem
@@ -245,14 +258,22 @@ fn runInstall() !void {
     const exe = selfPath(&sb) orelse return error.Disk;
     var ub: [1024]u8 = undefined;
 
-    // A lista assinada vem primeiro: sem ela, nada é baixado.
+    // Quando SHA256SUMS está publicado, confere por ele (e pela assinatura Ed25519
+    // se uma chave pública estiver configurada); caso contrário usa o digest SHA-256
+    // fornecido pela API HTTPS do GitHub Releases para o asset.
     var sums: std.ArrayList(u8) = .empty;
     defer sums.deinit(alloc);
-    var sig: std.ArrayList(u8) = .empty;
-    defer sig.deinit(alloc);
-    try fetch(try assetUrl(&ub, "SHA256SUMS"), &sums, 64 * 1024, null);
-    try fetch(try assetUrl(&ub, "SHA256SUMS.sig"), &sig, 4096, null);
-    if (!version.signatureOk(sums.items, sig.items, version.release_key_hex)) return error.BadSignature;
+    var have_sums = false;
+    if (findAsset("SHA256SUMS", false) != null) {
+        try fetch(try assetUrl(&ub, "SHA256SUMS"), &sums, 64 * 1024, null);
+        have_sums = true;
+        if (version.release_key_hex.len > 0) {
+            var sig: std.ArrayList(u8) = .empty;
+            defer sig.deinit(alloc);
+            try fetch(try assetUrl(&ub, "SHA256SUMS.sig"), &sig, 4096, null);
+            if (!version.signatureOk(sums.items, sig.items, version.release_key_hex)) return error.BadSignature;
+        }
+    }
 
     var dir_buf: [1024]u8 = undefined;
     const stage = at.stageDir(&dir_buf, exe, sys.windows) orelse return error.Disk;
@@ -261,10 +282,15 @@ fn runInstall() !void {
 
     // Baixa tudo antes de trocar qualquer coisa: uma falha aqui não estraga nada.
     for (files, 0..) |f, i| {
-        const want = version.sumFor(sums.items, f.asset) orelse return error.BadHash;
+        const resolved = findAsset(f.asset, f.name == null) orelse return error.NoRelease;
+        const want = if (have_sums)
+            (version.sumFor(sums.items, resolved.name) orelse resolved.info.digest orelse return error.BadHash)
+        else
+            (resolved.info.digest orelse return error.BadHash);
+        const dl_url = std.fmt.bufPrintSentinel(&ub, "{s}", .{resolved.info.url}, 0) catch return error.NoRelease;
         var data: std.ArrayList(u8) = .empty;
         defer data.deinit(alloc);
-        try fetch(try assetUrl(&ub, f.asset), &data, 128 * 1024 * 1024, null);
+        try fetch(dl_url, &data, 128 * 1024 * 1024, null);
         var got: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(data.items, &got, .{});
         if (!std.mem.eql(u8, &got, &want)) return error.BadHash;

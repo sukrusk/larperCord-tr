@@ -37,6 +37,10 @@ const voz = @import("../core/voz.zig");
 const ruido = @import("../core/ruido.zig");
 const nivel = @import("../core/nivel.zig");
 const voz_audio = @import("voz_audio.zig");
+const video_cfg = @import("../core/video_cfg.zig");
+const video_rtp = @import("../core/video_rtp.zig");
+const capture_backend = @import("../platform/capture_backend.zig");
+const video_diag = @import("../platform/video_diag.zig");
 
 const Id = types.Id;
 const alloc = std.heap.c_allocator;
@@ -83,6 +87,138 @@ pub const Dsp = struct {
     level: bool = false,
 };
 
+pub const VideoFrameCb = *const fn (
+    ctx: ?*anyopaque,
+    peer: Id,
+    is_stream: bool,
+    w: u16,
+    h: u16,
+    y: []const u8,
+    y_pitch: usize,
+    uv: []const u8,
+    uv_pitch: usize,
+    codec: video_cfg.Codec,
+    pts_ms: i64,
+) void;
+
+pub const VideoClearCb = *const fn (ctx: ?*anyopaque, peer: Id, is_stream: bool) void;
+
+pub const MediaBridge = struct {
+    mu: ?*c.SDL_Mutex = null,
+    active_cam: ?*Voice = null,
+    active_stream: ?*Voice = null,
+    on_remote_frame: ?VideoFrameCb = null,
+    on_remote_clear: ?VideoClearCb = null,
+    on_remote_ctx: ?*anyopaque = null,
+
+    fn ensureMu(self: *MediaBridge) void {
+        if (self.mu == null) self.mu = c.SDL_CreateMutex();
+    }
+
+    pub fn setRemoteSink(self: *MediaBridge, ctx: ?*anyopaque, cb: ?VideoFrameCb) void {
+        self.ensureMu();
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        self.on_remote_ctx = ctx;
+        self.on_remote_frame = cb;
+    }
+
+    pub fn setRemoteClearSink(self: *MediaBridge, cb: ?VideoClearCb) void {
+        self.ensureMu();
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        self.on_remote_clear = cb;
+    }
+
+    pub fn clearRemote(self: *MediaBridge, peer: Id, is_stream: bool) void {
+        if (self.mu == null) return;
+        c.SDL_LockMutex(self.mu);
+        const cb = self.on_remote_clear;
+        const ctx = self.on_remote_ctx;
+        c.SDL_UnlockMutex(self.mu);
+        if (cb) |f| f(ctx, peer, is_stream);
+    }
+
+    pub fn bind(self: *MediaBridge, is_stream: bool, v: ?*Voice) void {
+        self.ensureMu();
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        if (is_stream) self.active_stream = v else self.active_cam = v;
+    }
+
+    pub fn unbindIfEq(self: *MediaBridge, is_stream: bool, v: *Voice) void {
+        self.ensureMu();
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        if (is_stream) {
+            if (self.active_stream == v) self.active_stream = null;
+        } else {
+            if (self.active_cam == v) self.active_cam = null;
+        }
+    }
+
+    pub fn hasTarget(self: *MediaBridge, is_stream: bool) bool {
+        if (self.mu == null) return false;
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        return (if (is_stream) self.active_stream else self.active_cam) != null;
+    }
+
+    pub fn submitAu(self: *MediaBridge, is_stream: bool, codec: video_cfg.Codec, pts_us: i64, is_keyframe: bool, au: []const u8) void {
+        if (self.mu == null) return;
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        const target = if (is_stream) self.active_stream else self.active_cam;
+        if (target) |v| v.submitVideoAu(codec, pts_us, is_keyframe, au);
+    }
+
+    pub fn consumeKeyReq(self: *MediaBridge, is_stream: bool) bool {
+        if (self.mu == null) return false;
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        const target = if (is_stream) self.active_stream else self.active_cam;
+        return if (target) |v| v.consumeVideoKeyframeReq() else false;
+    }
+
+    pub fn targetBitrateKbps(self: *MediaBridge, is_stream: bool) u32 {
+        if (self.mu == null) return 0;
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        const target = if (is_stream) self.active_stream else self.active_cam;
+        return if (target) |v| v.video_target_kbps.load(.acquire) else 0;
+    }
+
+    pub fn submitAudio(self: *MediaBridge, pcm_f32: []const f32) void {
+        if (self.mu == null) return;
+        c.SDL_LockMutex(self.mu);
+        defer c.SDL_UnlockMutex(self.mu);
+        if (self.active_stream) |v| v.submitStreamAudio(pcm_f32);
+    }
+
+    pub fn deliverRemote(
+        self: *MediaBridge,
+        peer: Id,
+        is_stream: bool,
+        w: u16,
+        h: u16,
+        y: []const u8,
+        y_pitch: usize,
+        uv: []const u8,
+        uv_pitch: usize,
+        codec: video_cfg.Codec,
+        pts_ms: i64,
+    ) void {
+        if (self.mu == null) return;
+        c.SDL_LockMutex(self.mu);
+        const cb = self.on_remote_frame;
+        const ctx = self.on_remote_ctx;
+        c.SDL_UnlockMutex(self.mu);
+        if (cb) |f| f(ctx, peer, is_stream, w, h, y, y_pitch, uv, uv_pitch, codec, pts_ms);
+    }
+};
+
+pub var media_bridge: MediaBridge = .{};
+
 pub const Voice = struct {
     sink: Sink,
     guild: Id = 0,
@@ -109,6 +245,34 @@ pub const Voice = struct {
     /// Sem rede: só o microfone e a detecção de voz (a demonstração).
     local: bool = false,
 
+    // --- Vídeo / Go Live (zero alocação até ativar câmera/screen share) -----
+    video_capable: bool = true,
+    is_stream: bool = false,
+    stream_key: [96]u8 = @splat(0),
+    stream_key_len: u8 = 0,
+    video_enabled: std.atomic.Value(bool) = .init(false),
+    video_codec: std.atomic.Value(u8) = .init(@intFromEnum(video_cfg.Codec.h264)),
+    video_w: std.atomic.Value(u16) = .init(1920),
+    video_h: std.atomic.Value(u16) = .init(1080),
+    video_fps: std.atomic.Value(u8) = .init(30),
+    video_bitrate: std.atomic.Value(u32) = .init(8000),
+    video_target_kbps: std.atomic.Value(u32) = .init(8000),
+    video_keyframe_req: std.atomic.Value(bool) = .init(false),
+    video_mu: ?*c.SDL_Mutex = null,
+    tx_ring: [8]VideoTxPkt = @splat(.{}),
+    tx_head: u8 = 0,
+    tx_tail: u8 = 0,
+    tx_count: u8 = 0,
+    tx_wait_key: bool = false,
+    video_wake: sys.Wake = .{},
+    sys_audio_mu: ?*c.SDL_Mutex = null,
+    sys_audio_ring: []i16 = &.{},
+    sys_audio_read: usize = 0,
+    sys_audio_write: usize = 0,
+    sys_audio_count: usize = 0,
+    on_video_frame: ?VideoFrameCb = null,
+    on_video_ctx: ?*anyopaque = null,
+
     pub fn init(sink: Sink, guild: Id, channel: Id, user: Id, endpoint: []const u8, token: []const u8, session: []const u8, mute: bool, deaf: bool) Voice {
         var v: Voice = .{ .sink = sink, .guild = guild, .user = user };
         v.channel = .init(channel);
@@ -121,16 +285,165 @@ pub const Voice = struct {
         v.muted = .init(mute);
         v.deafened = .init(deaf);
         v.volume_mutex = c.SDL_CreateMutex();
+        v.video_mu = c.SDL_CreateMutex();
+        v.sys_audio_mu = c.SDL_CreateMutex();
         return v;
+    }
+
+    pub fn setStreamMode(v: *Voice, stream_key: []const u8) void {
+        v.is_stream = true;
+        v.video_capable = true;
+        v.stream_key_len = @intCast(@min(stream_key.len, v.stream_key.len - 1));
+        @memcpy(v.stream_key[0..v.stream_key_len], stream_key[0..v.stream_key_len]);
+    }
+
+    pub fn setOnVideoFrame(v: *Voice, ctx: ?*anyopaque, cb: ?VideoFrameCb) void {
+        c.SDL_LockMutex(v.video_mu);
+        defer c.SDL_UnlockMutex(v.video_mu);
+        v.on_video_ctx = ctx;
+        v.on_video_frame = cb;
+    }
+
+    pub fn setVideoEnabled(v: *Voice, enabled: bool, codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32) void {
+        const eff: video_cfg.Codec = if (codec == .auto) .h264 else codec;
+        v.video_codec.store(@intFromEnum(eff), .release);
+        v.video_w.store(w, .release);
+        v.video_h.store(h, .release);
+        v.video_fps.store(@max(fps, 1), .release);
+        v.video_bitrate.store(@max(bitrate_kbps, 500), .release);
+        v.video_target_kbps.store(@max(bitrate_kbps, 500), .release);
+        v.video_enabled.store(enabled, .release);
+        if (enabled) {
+            c.SDL_LockMutex(v.video_mu);
+            v.tx_head = 0;
+            v.tx_tail = 0;
+            v.tx_count = 0;
+            v.tx_wait_key = true;
+            c.SDL_UnlockMutex(v.video_mu);
+            v.video_keyframe_req.store(true, .release);
+        } else {
+            c.SDL_LockMutex(v.video_mu);
+            v.tx_head = 0;
+            v.tx_tail = 0;
+            v.tx_count = 0;
+            v.tx_wait_key = false;
+            for (&v.tx_ring) |*slot| {
+                if (slot.buf.len > 0) {
+                    std.heap.page_allocator.free(slot.buf);
+                    slot.* = .{};
+                } else {
+                    slot.len = 0;
+                }
+            }
+            c.SDL_UnlockMutex(v.video_mu);
+
+            c.SDL_LockMutex(v.sys_audio_mu);
+            v.sys_audio_read = 0;
+            v.sys_audio_write = 0;
+            v.sys_audio_count = 0;
+            if (v.sys_audio_ring.len > 0) {
+                std.heap.page_allocator.free(v.sys_audio_ring);
+                v.sys_audio_ring = &.{};
+            }
+            c.SDL_UnlockMutex(v.sys_audio_mu);
+        }
+    }
+
+    pub fn consumeVideoKeyframeReq(v: *Voice) bool {
+        return v.video_keyframe_req.swap(false, .acq_rel);
+    }
+
+    pub fn submitVideoAu(v: *Voice, codec: video_cfg.Codec, pts_us: i64, is_keyframe: bool, au: []const u8) void {
+        if (!v.video_enabled.load(.acquire) or au.len == 0 or au.len > video_rtp.max_frame_bytes) return;
+        c.SDL_LockMutex(v.video_mu);
+        var wake = false;
+        defer {
+            c.SDL_UnlockMutex(v.video_mu);
+            if (wake and sys.valid(v.video_wake.write)) sys.wakeSignal(v.video_wake.write);
+        }
+        if (v.tx_wait_key and !is_keyframe) {
+            video_diag.txDrop();
+            return;
+        }
+        if (v.tx_count == v.tx_ring.len) {
+            if (is_keyframe) {
+                // Novo keyframe substitui fila antiga sem quebrar cadeia P-frame.
+                v.tx_head = 0;
+                v.tx_tail = 0;
+                v.tx_count = 0;
+                video_diag.txDrop();
+            } else {
+                v.tx_wait_key = true;
+                v.video_keyframe_req.store(true, .release);
+                video_diag.txDrop();
+                return;
+            }
+        }
+        if (is_keyframe) v.tx_wait_key = false;
+        const slot = &v.tx_ring[v.tx_tail];
+        if (slot.buf.len < au.len) {
+            const new_cap = @max(au.len, 256 * 1024);
+            const next = std.heap.page_allocator.alloc(u8, new_cap) catch return;
+            if (slot.buf.len > 0) std.heap.page_allocator.free(slot.buf);
+            slot.buf = next;
+        }
+        @memcpy(slot.buf[0..au.len], au);
+        slot.len = au.len;
+        slot.pts_us = pts_us;
+        slot.is_key = is_keyframe;
+        slot.codec = codec;
+        v.tx_tail = (v.tx_tail + 1) % @as(u8, @intCast(v.tx_ring.len));
+        v.tx_count += 1;
+        wake = true;
+    }
+
+    pub fn submitStreamAudio(v: *Voice, samples_f32: []const f32) void {
+        if (!v.is_stream or samples_f32.len == 0) return;
+        c.SDL_LockMutex(v.sys_audio_mu);
+        defer c.SDL_UnlockMutex(v.sys_audio_mu);
+        if (v.sys_audio_ring.len == 0) {
+            v.sys_audio_ring = std.heap.page_allocator.alloc(i16, frame_samples * channels * 8) catch return;
+        }
+        const cap = v.sys_audio_ring.len;
+        for (samples_f32) |s| {
+            const clamped = std.math.clamp(s, -1.0, 1.0);
+            const iv: i16 = @intFromFloat(clamped * 32767.0);
+            if (v.sys_audio_count == cap) {
+                v.sys_audio_read = (v.sys_audio_read + 1) % cap;
+                v.sys_audio_count -= 1;
+            }
+            v.sys_audio_ring[v.sys_audio_write] = iv;
+            v.sys_audio_write = (v.sys_audio_write + 1) % cap;
+            v.sys_audio_count += 1;
+        }
+    }
+
+    fn takeStreamAudioFrame(v: *Voice, out_pcm: *[frame_samples * channels]i16) bool {
+        if (!v.is_stream) return false;
+        c.SDL_LockMutex(v.sys_audio_mu);
+        defer c.SDL_UnlockMutex(v.sys_audio_mu);
+        if (v.sys_audio_count < out_pcm.len or v.sys_audio_ring.len == 0) return false;
+        const cap = v.sys_audio_ring.len;
+        for (out_pcm) |*dst| {
+            dst.* = v.sys_audio_ring[v.sys_audio_read];
+            v.sys_audio_read = (v.sys_audio_read + 1) % cap;
+        }
+        v.sys_audio_count -= out_pcm.len;
+        return true;
     }
 
     pub fn start(v: *Voice) !void {
         debug_on = c.SDL_getenv("LARPER_VOICE_DEBUG") != null;
-        v.thread = c.SDL_CreateThread(threadMain, "voice", v) orelse return error.SdlThread;
+        if (!sys.valid(v.video_wake.read)) v.video_wake = sys.Wake.open();
+        v.thread = c.SDL_CreateThread(threadMain, "voice", v) orelse {
+            v.video_wake.close();
+            return error.SdlThread;
+        };
     }
 
     pub fn stop(v: *Voice) void {
         v.stopping.store(true, .release);
+        if (sys.valid(v.video_wake.write)) sys.wakeSignal(v.video_wake.write);
         if (v.thread) |t| {
             c.SDL_WaitThread(t, null);
             v.thread = null;
@@ -142,6 +455,19 @@ pub const Voice = struct {
         std.crypto.secureZero(u8, &v.session);
         v.volumes.deinit(alloc);
         v.dsp.deinit(alloc);
+        for (&v.tx_ring) |*slot| {
+            if (slot.buf.len > 0) {
+                std.heap.page_allocator.free(slot.buf);
+                slot.* = .{};
+            }
+        }
+        if (v.sys_audio_ring.len > 0) {
+            std.heap.page_allocator.free(v.sys_audio_ring);
+            v.sys_audio_ring = &.{};
+        }
+        v.video_wake.close();
+        if (v.video_mu) |m| c.SDL_DestroyMutex(m);
+        if (v.sys_audio_mu) |m| c.SDL_DestroyMutex(m);
         if (v.volume_mutex) |m| c.SDL_DestroyMutex(m);
     }
 
@@ -287,6 +613,37 @@ const Worker = struct {
     ws_in: std.ArrayList(u8) = .empty,
     in_buf: [65536]u8 = undefined,
     url_buf: [320]u8 = undefined,
+    // Vídeo / Go Live (só alocam quando ativos).
+    video_ssrc: u32 = 0,
+    video_rtx_ssrc: u32 = 0,
+    video_pt: u7 = 101,
+    video_rtx_pt: u7 = 102,
+    video_announced: bool = false,
+    video_rtp_seq: u16 = 0,
+    last_key_req_ms: i64 = 0,
+    sent_video_frames: u64 = 0,
+    recv_video_frames: u64 = 0,
+    video_ssrcs: std.AutoHashMapUnmanaged(u32, Id) = .empty,
+    video_rtx_ssrcs: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    video_work_buf: []u8 = &.{},
+    tx_rtp_cache: []RtpPktSlot = &.{},
+    rtp_out_ring: []RtpPktSlot = &.{},
+    rtp_out_head: u16 = 0,
+    rtp_out_tail: u16 = 0,
+    rtp_out_count: u16 = 0,
+    last_remb_ms: i64 = 0,
+    video_rx: [8]VideoRxSlot = @splat(.{}),
+    // Decodificação H.264 assíncrona para nunca travar o UDP/áudio.
+    dec_mu: ?*c.SDL_Mutex = null,
+    dec_cond: ?*c.SDL_Condition = null,
+    dec_thread: ?*c.SDL_Thread = null,
+    dec_stop: std.atomic.Value(bool) = .init(false),
+    dec_ring: [8]DecJob = @splat(.{}),
+    dec_head: u8 = 0,
+    dec_tail: u8 = 0,
+    dec_count: u8 = 0,
+    dec_wait_key: bool = false,
+    dec_drop_user: std.atomic.Value(Id) = .init(0),
 
     fn run(w: *Worker) Ended {
         defer w.cleanup();
@@ -414,6 +771,7 @@ const Worker = struct {
     }
 
     fn cleanup(w: *Worker) void {
+        w.stopDecWorker();
         voz_audio.sh.call_level_db.store(voz.db_silence, .monotonic);
         for (w.sources[0..w.n_sources]) |*s| s.deinit();
         w.n_sources = 0;
@@ -429,6 +787,32 @@ const Worker = struct {
         w.ws_in.deinit(alloc);
         w.call_users.deinit(alloc);
         w.call_ssrcs.deinit(alloc);
+        w.video_ssrcs.deinit(alloc);
+        w.video_rtx_ssrcs.deinit(alloc);
+        for (&w.video_rx) |*rx| {
+            if (rx.active and rx.user != 0) media_bridge.clearRemote(rx.user, w.v.is_stream);
+            rx.deinit();
+        }
+        if (w.v.is_stream and !w.v.video_enabled.load(.acquire)) media_bridge.clearRemote(0, true);
+        w.freeVideoTxBufs();
+    }
+
+    fn freeVideoTxBufs(w: *Worker) void {
+        if (w.video_work_buf.len > 0) {
+            std.heap.page_allocator.free(w.video_work_buf);
+            w.video_work_buf = &.{};
+        }
+        if (w.tx_rtp_cache.len > 0) {
+            std.heap.page_allocator.free(w.tx_rtp_cache);
+            w.tx_rtp_cache = &.{};
+        }
+        if (w.rtp_out_ring.len > 0) {
+            std.heap.page_allocator.free(w.rtp_out_ring);
+            w.rtp_out_ring = &.{};
+        }
+        w.rtp_out_head = 0;
+        w.rtp_out_tail = 0;
+        w.rtp_out_count = 0;
     }
 
     fn addCallUser(w: *Worker, uid: Id) void {
@@ -441,7 +825,8 @@ const Worker = struct {
             if (w.v.stopping.load(.acquire)) return .stop;
             const now = nowMs();
             const next = if (w.connected) @min(w.next_hb, w.next_frame) else w.next_hb;
-            const wait: c_int = @intCast(std.math.clamp(next - now, 0, 50));
+            var wait: c_int = @intCast(std.math.clamp(next - now, 0, 50));
+            if (w.connected and (w.v.video_enabled.load(.acquire) or w.rtp_out_count > 0 or w.v.tx_count > 0)) wait = @min(wait, 2);
             w.waitSockets(wait);
             const woke = nowMs();
             w.stats.wake_late_ms = @max(w.stats.wake_late_ms, woke - now - wait);
@@ -454,7 +839,7 @@ const Worker = struct {
     }
 
     fn waitSockets(w: *Worker, timeout_ms: c_int) void {
-        var fds: [2]sys.PollFd = undefined;
+        var fds: [3]sys.PollFd = undefined;
         var n: usize = 0;
         if (sys.valid(w.ws_sock)) {
             fds[n] = .{ .fd = w.ws_sock, .events = c.POLLIN, .revents = 0 };
@@ -464,11 +849,16 @@ const Worker = struct {
             fds[n] = .{ .fd = w.udp, .events = c.POLLIN, .revents = 0 };
             n += 1;
         }
+        if (sys.valid(w.v.video_wake.read)) {
+            fds[n] = .{ .fd = w.v.video_wake.read, .events = c.POLLIN, .revents = 0 };
+            n += 1;
+        }
         if (n == 0) {
             c.SDL_Delay(@intCast(timeout_ms));
             return;
         }
         sys.poll(&fds, n, timeout_ms);
+        if (sys.valid(w.v.video_wake.read)) w.v.video_wake.drain();
     }
 
     fn tick(w: *Worker, now: i64) void {
@@ -499,8 +889,11 @@ const Worker = struct {
             if (w.next_frame < now - 100) w.next_frame = now + frame_ms; // não acumula atraso
             if (debugOn()) w.watchQueues();
         }
+        w.syncVideoOp12();
+        w.pumpVideoTx();
         w.conceal();
         w.expireSpeakers(now);
+        video_diag.maybeFlush(now);
     }
 
     // --- WebSocket ---------------------------------------------------------
@@ -562,7 +955,18 @@ const Worker = struct {
             out.deinit(alloc);
         }
         // Numa DM ou grupo o `server_id` é o canal (call_json.serverId).
-        call_json.writeIdentify(&out, alloc, w.v.guild, w.v.channel.load(.acquire), w.v.user, w.v.session[0..w.v.session_len], w.v.token[0..w.v.token_len], @intCast(c.daveMaxSupportedProtocolVersion())) catch return;
+        call_json.writeIdentifyVideoKind(
+            &out,
+            alloc,
+            w.v.guild,
+            w.v.channel.load(.acquire),
+            w.v.user,
+            w.v.session[0..w.v.session_len],
+            w.v.token[0..w.v.token_len],
+            @intCast(c.daveMaxSupportedProtocolVersion()),
+            w.v.video_capable or w.v.is_stream or w.v.video_enabled.load(.acquire),
+            if (w.v.is_stream) "screen" else "video",
+        ) catch return;
         dbg("identify (DAVE até v{d})", .{c.daveMaxSupportedProtocolVersion()});
         _ = w.sendText(out.items);
     }
@@ -674,6 +1078,9 @@ const Worker = struct {
                 w.next_frame = nowMs();
                 if (w.connected) {
                     w.announceSpeaking();
+                    w.sendMediaSinkWants(0);
+                    w.video_announced = false;
+                    if (w.v.video_enabled.load(.acquire)) w.v.video_keyframe_req.store(true, .release);
                     w.v.status(.connected);
                 }
             },
@@ -681,11 +1088,13 @@ const Worker = struct {
             11 => for (j.array(j.get(d, "user_ids"))) |u| {
                 if (j.id(u)) |uid| w.addCallUser(uid);
             },
+            12 => w.onVideoSinks(d),
             // Flags e plataforma de quem está na call: também diz que ele está aqui.
             18, 20 => if (j.id(j.get(d, "user_id"))) |uid| w.addCallUser(uid),
             13 => if (j.id(j.get(d, "user_id"))) |uid| {
                 _ = w.call_users.remove(uid);
                 w.removeSource(uid);
+                w.removeVideoUser(uid);
                 if (w.dave) |*dave| dave.removeUser(uid);
                 w.v.emit(.{ .voice_speaking = .{ .user = uid, .speaking = false } });
             },
@@ -698,7 +1107,10 @@ const Worker = struct {
                     if (tid == 0) dave.executeTransition() else w.sendReady(tid);
                 } else if (tid != 0) w.sendReady(tid);
             },
-            22 => if (w.dave) |*dave| dave.executeTransition(),
+            22 => if (w.dave) |*dave| {
+                dave.executeTransition();
+                w.onDaveTransition();
+            },
             24 => {
                 const epoch = j.int(j.get(d, "epoch")) orelse 0;
                 const ver: u16 = @intCast(std.math.clamp(j.int(j.get(d, "protocol_version")) orelse 1, 0, 1));
@@ -743,7 +1155,7 @@ const Worker = struct {
                 const ok = if (opcode == 29) dave.commit(tid, payload[2..]) else dave.welcome(tid, payload[2..]);
                 const res = ok orelse return; // commit ignorado (nosso mesmo)
                 if (res) {
-                    if (tid != 0) w.sendReady(tid);
+                    if (tid != 0) w.sendReady(tid) else w.onDaveTransition();
                     dave.setLocalSsrc(w.ssrc);
                 } else {
                     // Commit/welcome inválido: avisa (op 31), recomeça o MLS
@@ -775,6 +1187,18 @@ const Worker = struct {
         const ip = j.str(j.get(d, "ip")) orelse return;
         const port: u16 = @intCast(std.math.clamp(j.int(j.get(d, "port")) orelse 0, 0, 65535));
         w.ssrc = @intCast(std.math.clamp(j.int(j.get(d, "ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+        w.video_ssrc = w.ssrc +% 1;
+        w.video_rtx_ssrc = w.ssrc +% 2;
+        w.video_announced = false;
+        for (j.array(j.get(d, "streams"))) |st| {
+            const v_s: u32 = @intCast(std.math.clamp(j.int(j.get(st, "ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+            if (v_s != 0) {
+                w.video_ssrc = v_s;
+                const r_s: u32 = @intCast(std.math.clamp(j.int(j.get(st, "rtx_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+                w.video_rtx_ssrc = if (r_s != 0) r_s else v_s +% 1;
+                break;
+            }
+        }
         if (port == 0) return;
         w.server = parseIp4(ip, port) catch {
             w.v.notice("endereço UDP de voz inválido", "invalid voice UDP address", .{});
@@ -788,6 +1212,7 @@ const Worker = struct {
             return;
         };
         w.udp = fd;
+        sys.bumpUdpBufs(w.udp, 2 * 1024 * 1024);
         if (!sys.bindAny(w.udp)) {
             w.v.notice("não consegui abrir o UDP da call", "couldn't open the call UDP", .{});
             w.end = .fatal;
@@ -821,10 +1246,45 @@ const Worker = struct {
     fn selectProtocol(w: *Worker, ip: []const u8, port: u16) void {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(alloc);
-        out.appendSlice(alloc, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":") catch return;
-        j.writeString(&out, alloc, ip) catch return;
-        out.print(alloc, ",\"port\":{d},\"mode\":\"aead_xchacha20_poly1305_rtpsize\"}}}}}}", .{port}) catch return;
+        const want_video = w.v.video_capable or w.v.is_stream;
+        call_json.writeSelectProtocol(&out, alloc, ip, port, want_video) catch return;
+        w.video_pt = 101;
+        w.video_rtx_pt = 102;
+        dbg("selectProtocol video={} mode=aead_xchacha20_poly1305_rtpsize pt={d}", .{ want_video, w.video_pt });
         _ = w.sendText(out.items);
+    }
+
+    fn sendMediaSinkWants(w: *Worker, extra_ssrc: u32) void {
+        var ssrcs: [9]u32 = undefined;
+        var n: usize = 0;
+        if (extra_ssrc != 0) {
+            ssrcs[n] = extra_ssrc;
+            n += 1;
+        }
+        var it = w.video_ssrcs.keyIterator();
+        while (it.next()) |sp| {
+            if (n >= ssrcs.len) break;
+            ssrcs[n] = sp.*;
+            n += 1;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        call_json.writeMediaSinkWantsList(&out, alloc, ssrcs[0..n]) catch return;
+        dbg("enviou op 15 media_sink_wants extra_ssrc={d} total={d}", .{ extra_ssrc, n });
+        _ = w.sendText(out.items);
+    }
+
+    fn onDaveTransition(w: *Worker) void {
+        if (w.dave) |*dave| {
+            if (dave.enabled and w.video_ssrc != 0 and w.v.video_enabled.load(.acquire)) {
+                dave.setLocalVideoSsrc(w.video_ssrc, activeDaveCodec(w));
+            }
+        }
+        if (w.v.video_enabled.load(.acquire)) {
+            w.v.video_keyframe_req.store(true, .release);
+            w.last_key_req_ms = nowMs();
+        }
+        w.sendMediaSinkWants(0);
     }
 
     fn onSession(w: *Worker, d: std.json.Value) void {
@@ -839,12 +1299,16 @@ const Worker = struct {
         for (keys, 0..) |kv, i| w.secret[i] = @intCast(std.math.clamp(j.int(kv) orelse 0, 0, 255));
         w.have_secret = true;
         const dave_ver: u16 = @intCast(std.math.clamp(j.int(j.get(d, "dave_protocol_version")) orelse 0, 0, 1));
-        dbg("sessão pronta (DAVE v{d})", .{dave_ver});
+        const vcodec_s = j.str(j.get(d, "video_codec")) orelse "none";
+        dbg("sessão pronta (DAVE v{d}, video={s})", .{ dave_ver, vcodec_s });
         if (dave_ver > 0 and w.dave == null) {
             w.initDave(dave_ver);
             w.sendKeyPackage();
         }
         w.announceSpeaking();
+        w.sendMediaSinkWants(0);
+        w.video_announced = false;
+        if (w.v.video_enabled.load(.acquire)) w.v.video_keyframe_req.store(true, .release);
         w.connected = true;
         w.next_frame = nowMs();
         w.next_keepalive = nowMs();
@@ -869,11 +1333,317 @@ const Worker = struct {
             return;
         };
         d.setLocalSsrc(w.ssrc);
+        if (w.video_ssrc != 0 and w.v.video_enabled.load(.acquire)) {
+            d.setLocalVideoSsrc(w.video_ssrc, activeDaveCodec(w));
+        }
         var ui = w.call_users.keyIterator();
         while (ui.next()) |u| d.addUser(u.*);
         var si = w.call_ssrcs.iterator();
         while (si.next()) |kv| d.setSsrcUser(kv.key_ptr.*, kv.value_ptr.*);
+        var vi = w.video_ssrcs.iterator();
+        while (vi.next()) |kv| d.setSsrcUser(kv.key_ptr.*, kv.value_ptr.*);
         w.dave = d;
+    }
+
+    fn activeDaveCodec(w: *Worker) c.DAVECodec {
+        const vc: video_cfg.Codec = @enumFromInt(w.v.video_codec.load(.acquire));
+        return switch (vc) {
+            .hevc => c.DAVE_CODEC_H265,
+            .av1 => c.DAVE_CODEC_AV1,
+            else => c.DAVE_CODEC_H264,
+        };
+    }
+
+    fn registerRemoteVideoSsrc(w: *Worker, ssrc: u32, rtx_ssrc: u32, uid: Id) void {
+        w.addCallUser(uid);
+        w.video_ssrcs.put(alloc, ssrc, uid) catch {};
+        if (rtx_ssrc != 0) w.video_rtx_ssrcs.put(alloc, rtx_ssrc, {}) catch {};
+        if (w.dave) |*dave| dave.setSsrcUser(ssrc, uid);
+        for (&w.video_rx) |*rx| if (rx.active and rx.ssrc == ssrc) {
+            rx.user = uid;
+        };
+    }
+
+    fn onVideoSinks(w: *Worker, d: std.json.Value) void {
+        const uid = j.id(j.get(d, "user_id")) orelse return;
+        if (uid == w.v.user) return;
+        const top_v: u32 = @intCast(std.math.clamp(j.int(j.get(d, "video_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+        const top_r: u32 = @intCast(std.math.clamp(j.int(j.get(d, "rtx_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+        var primary: u32 = 0;
+        var fallback_ssrc: u32 = 0;
+        var fallback_q: i64 = -1;
+        if (top_v != 0) {
+            w.registerRemoteVideoSsrc(top_v, top_r, uid);
+            primary = top_v;
+        }
+        var best_q: i64 = -1;
+        for (j.array(j.get(d, "streams"))) |st| {
+            const active = if (j.get(st, "active")) |av| (av == .bool and av.bool) else true;
+            const s: u32 = @intCast(std.math.clamp(j.int(j.get(st, "ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+            const rs: u32 = @intCast(std.math.clamp(j.int(j.get(st, "rtx_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+            if (s != 0) {
+                w.registerRemoteVideoSsrc(s, rs, uid);
+                var q: i64 = j.int(j.get(st, "quality")) orelse 0;
+                if (j.str(j.get(st, "rid"))) |rid| {
+                    if (std.mem.eql(u8, rid, "100")) q = @max(q, 100);
+                }
+                if (active) {
+                    if (primary == 0 or q > best_q) {
+                        primary = s;
+                        best_q = q;
+                    }
+                } else if (fallback_ssrc == 0 or q > fallback_q) {
+                    fallback_ssrc = s;
+                    fallback_q = q;
+                }
+            } else if (rs != 0) {
+                w.video_rtx_ssrcs.put(alloc, rs, {}) catch {};
+            }
+        }
+        if (primary == 0) primary = fallback_ssrc;
+        if (primary != 0) {
+            video_diag.setOp12Ssrc(primary);
+            dbg("op 12 peer={d} video_ssrc={d}", .{ uid, primary });
+            w.sendMediaSinkWants(primary);
+            w.sendVideoPli(primary);
+        } else {
+            dbg("op 12 peer={d} vídeo encerrado", .{uid});
+            w.removeVideoUser(uid);
+            media_bridge.clearRemote(uid, w.v.is_stream);
+        }
+    }
+
+    fn removeVideoUser(w: *Worker, uid: Id) void {
+        var dead: [16]u32 = undefined;
+        var dn: usize = 0;
+        var it = w.video_ssrcs.iterator();
+        while (it.next()) |kv| {
+            if (kv.value_ptr.* == uid and dn < dead.len) {
+                dead[dn] = kv.key_ptr.*;
+                dn += 1;
+            }
+        }
+        for (dead[0..dn]) |ssrc| _ = w.video_ssrcs.remove(ssrc);
+        for (&w.video_rx) |*rx| {
+            if (rx.active and rx.user == uid) rx.deinit();
+        }
+        w.dec_drop_user.store(uid, .release);
+        media_bridge.clearRemote(uid, w.v.is_stream);
+    }
+
+    fn syncVideoOp12(w: *Worker) void {
+        if (!w.connected or w.video_ssrc == 0) return;
+        const want = w.v.video_enabled.load(.acquire);
+        if (want == w.video_announced) return;
+        w.video_announced = want;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        const bw_bps = @as(u32, w.v.video_bitrate.load(.acquire)) * 1000;
+        call_json.writeVideoOp12Kind(
+            &out,
+            alloc,
+            w.ssrc,
+            if (want) w.video_ssrc else 0,
+            if (want) w.video_rtx_ssrc else 0,
+            want,
+            w.v.video_w.load(.acquire),
+            w.v.video_h.load(.acquire),
+            w.v.video_fps.load(.acquire),
+            bw_bps,
+            if (w.v.is_stream) "screen" else "video",
+        ) catch return;
+        dbg("enviou op 12 video active={} ssrc={d} {d}x{d}@{d}", .{
+            want,
+            w.video_ssrc,
+            w.v.video_w.load(.acquire),
+            w.v.video_h.load(.acquire),
+            w.v.video_fps.load(.acquire),
+        });
+        _ = w.sendText(out.items);
+        if (want) {
+            if (w.dave) |*dave| dave.setLocalVideoSsrc(w.video_ssrc, activeDaveCodec(w));
+            w.v.video_keyframe_req.store(true, .release);
+            w.last_key_req_ms = nowMs();
+        } else {
+            w.freeVideoTxBufs();
+        }
+    }
+
+    fn ensureVideoTxQueues(w: *Worker) bool {
+        if (w.tx_rtp_cache.len == 0) {
+            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 256) catch return false;
+            @memset(mem, .{});
+            w.tx_rtp_cache = mem;
+        }
+        if (w.rtp_out_ring.len == 0) {
+            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 256) catch return false;
+            @memset(mem, .{});
+            w.rtp_out_ring = mem;
+        }
+        return true;
+    }
+
+    fn pumpVideoTx(w: *Worker) void {
+        if (!w.connected or w.video_ssrc == 0 or !w.have_secret) return;
+        if (!w.v.video_enabled.load(.acquire)) return;
+        if (w.dave) |*dave| {
+            if (dave.version > 0 and !dave.enabled) return;
+        }
+        const now = nowMs();
+        if (w.sent_video_frames == 0 and now - w.last_key_req_ms >= 1500) {
+            w.last_key_req_ms = now;
+            w.v.video_keyframe_req.store(true, .release);
+        }
+
+        // Retira quadros da fila apenas enquanto o pacer de pacotes UDP tiver espaço, evitando explosões em rajada.
+        var pulled: u8 = 0;
+        while (pulled < 2 and w.rtp_out_count <= 140) : (pulled += 1) {
+            c.SDL_LockMutex(w.v.video_mu);
+            if (w.v.tx_count == 0) {
+                c.SDL_UnlockMutex(w.v.video_mu);
+                break;
+            }
+            const slot = &w.v.tx_ring[w.v.tx_head];
+            const raw_len = slot.len;
+            const pts_us = slot.pts_us;
+            const vcodec = slot.codec;
+            if (raw_len == 0) {
+                w.v.tx_head = (w.v.tx_head + 1) % @as(u8, @intCast(w.v.tx_ring.len));
+                w.v.tx_count -= 1;
+                c.SDL_UnlockMutex(w.v.video_mu);
+                continue;
+            }
+            const need_work = raw_len * 2 + 512;
+            if (w.video_work_buf.len < need_work) {
+                const next = std.heap.page_allocator.alloc(u8, @max(need_work, 512 * 1024)) catch {
+                    c.SDL_UnlockMutex(w.v.video_mu);
+                    return;
+                };
+                if (w.video_work_buf.len > 0) std.heap.page_allocator.free(w.video_work_buf);
+                w.video_work_buf = next;
+            }
+            @memcpy(w.video_work_buf[0..raw_len], slot.buf[0..raw_len]);
+            w.v.tx_head = (w.v.tx_head + 1) % @as(u8, @intCast(w.v.tx_ring.len));
+            w.v.tx_count -= 1;
+            c.SDL_UnlockMutex(w.v.video_mu);
+
+            var payload: []const u8 = w.video_work_buf[0..raw_len];
+            if (w.dave) |*dave| if (dave.enabled) {
+                const dst = w.video_work_buf[raw_len..];
+                const dcodec: c.DAVECodec = switch (vcodec) {
+                    .hevc => c.DAVE_CODEC_H265,
+                    .av1 => c.DAVE_CODEC_AV1,
+                    else => c.DAVE_CODEC_H264,
+                };
+                dave.setLocalVideoSsrc(w.video_ssrc, dcodec);
+                const enc_n = dave.encryptMedia(c.DAVE_MEDIA_TYPE_VIDEO, w.video_ssrc, payload, dst);
+                if (enc_n == 0) continue;
+                payload = dst[0..enc_n];
+            };
+
+            const rtp_ts: u32 = @truncate((@as(u64, @intCast(@max(pts_us, @as(i64, 0)))) * 90) / 1000);
+            const TxCtx = struct {
+                w: *Worker,
+                rtp_ts: u32,
+                pt: u7,
+                fn onPkt(ctx: *anyopaque, pkt_payload: []const u8, marker: bool) void {
+                    const self: *@This() = @ptrCast(@alignCast(ctx));
+                    self.w.queueVideoRtp(pkt_payload, self.pt, marker, self.rtp_ts);
+                }
+            };
+            var tx: TxCtx = .{ .w = w, .rtp_ts = rtp_ts, .pt = w.video_pt };
+            video_rtp.packetizeH264AnnexB(payload, video_rtp.max_rtp_payload, .{ .ctx = &tx, .emit = TxCtx.onPkt });
+            if (w.sent_video_frames == 0) dbg("primeiro quadro de vídeo enviado ({d} bytes, pt={d}, dave={})", .{ payload.len, w.video_pt, w.dave != null and w.dave.?.enabled });
+            w.sent_video_frames += 1;
+            video_diag.txSent();
+        }
+
+        w.drainVideoPacer();
+    }
+
+    fn queueVideoRtp(w: *Worker, payload: []const u8, pt: u7, marker: bool, rtp_ts: u32) void {
+        if (payload.len == 0 or payload.len > 1280) return;
+        if (!w.ensureVideoTxQueues()) {
+            const seq = w.video_rtp_seq;
+            w.video_rtp_seq +%= 1;
+            w.sendVideoRtpRaw(payload, pt, marker, rtp_ts, seq);
+            return;
+        }
+        const seq = w.video_rtp_seq;
+        w.video_rtp_seq +%= 1;
+
+        const cache = &w.tx_rtp_cache[seq & 255];
+        @memcpy(cache.payload[0..payload.len], payload);
+        cache.len = @intCast(payload.len);
+        cache.seq = seq;
+        cache.ts = rtp_ts;
+        cache.pt = pt;
+        cache.marker = marker;
+        cache.valid = true;
+
+        if (w.rtp_out_count == w.rtp_out_ring.len) {
+            // Descarta o pacote mais antigo pendente para nunca travar por fila cheia.
+            w.rtp_out_head = @intCast((@as(usize, w.rtp_out_head) + 1) % w.rtp_out_ring.len);
+            w.rtp_out_count -= 1;
+        }
+        const out_slot = &w.rtp_out_ring[w.rtp_out_tail];
+        out_slot.* = cache.*;
+        w.rtp_out_tail = @intCast((@as(usize, w.rtp_out_tail) + 1) % w.rtp_out_ring.len);
+        w.rtp_out_count += 1;
+    }
+
+    fn drainVideoPacer(w: *Worker) void {
+        if (w.rtp_out_count == 0 or w.rtp_out_ring.len == 0) return;
+        // Envia rajada moderada (~12 pacotes por tick de 2ms) para não estourar buffers de roteador/SFU.
+        var sent: u16 = 0;
+        const max_burst: u16 = if (w.rtp_out_count > 64) 18 else 12;
+        while (w.rtp_out_count > 0 and sent < max_burst) : (sent += 1) {
+            const s = &w.rtp_out_ring[w.rtp_out_head];
+            w.sendVideoRtpRaw(s.payload[0..s.len], s.pt, s.marker, s.ts, s.seq);
+            w.rtp_out_head = @intCast((@as(usize, w.rtp_out_head) + 1) % w.rtp_out_ring.len);
+            w.rtp_out_count -= 1;
+        }
+    }
+
+    fn sendVideoRtpRaw(w: *Worker, payload: []const u8, pt: u7, marker: bool, rtp_ts: u32, seq: u16) void {
+        if (!sys.valid(w.udp) or payload.len == 0 or !w.have_secret) return;
+        var buf: [12 + 1280 + 16 + 4]u8 = undefined;
+        const off = 12;
+        if (payload.len + off + 16 + 4 > buf.len) return;
+        buf[0] = 0x80;
+        buf[1] = (@as(u8, @intFromBool(marker)) << 7) | @as(u8, pt);
+        std.mem.writeInt(u16, buf[2..4], seq, .big);
+        std.mem.writeInt(u32, buf[4..8], rtp_ts, .big);
+        std.mem.writeInt(u32, buf[8..12], w.video_ssrc, .big);
+        var nonce: [24]u8 = @splat(0);
+        w.nonce +%= 1;
+        std.mem.writeInt(u32, nonce[0..4], w.nonce, .big);
+        var tag: [16]u8 = undefined;
+        const aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+        aead.encrypt(buf[off..][0..payload.len], &tag, payload, buf[0..off], nonce, w.secret);
+        @memcpy(buf[off + payload.len ..][0..16], &tag);
+        @memcpy(buf[off + payload.len + 16 ..][0..4], nonce[0..4]);
+        const total = off + payload.len + 16 + 4;
+        _ = sys.sendTo(w.udp, buf[0..total], &w.server);
+        video_diag.txRtp();
+    }
+
+    fn sendVideoPli(w: *Worker, media_ssrc: u32) void {
+        if (!sys.valid(w.udp) or !w.have_secret) return;
+        const sender = if (w.video_ssrc != 0) w.video_ssrc else w.ssrc;
+        var pli: [12]u8 = undefined;
+        video_rtp.buildRtcpPli(&pli, sender, media_ssrc);
+        var buf: [8 + 4 + 16 + 4]u8 = undefined;
+        @memcpy(buf[0..8], pli[0..8]);
+        var nonce: [24]u8 = @splat(0);
+        w.nonce +%= 1;
+        std.mem.writeInt(u32, nonce[0..4], w.nonce, .big);
+        var tag: [16]u8 = undefined;
+        const aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+        aead.encrypt(buf[8..12], &tag, pli[8..12], buf[0..8], nonce, w.secret);
+        @memcpy(buf[12..28], &tag);
+        @memcpy(buf[28..32], nonce[0..4]);
+        _ = sys.sendTo(w.udp, &buf, &w.server);
     }
 
     fn sendKeyPackage(w: *Worker) void {
@@ -887,8 +1657,7 @@ const Worker = struct {
 
     fn readUdp(w: *Worker) void {
         if (!sys.valid(w.udp)) return;
-        // No máximo 64 pacotes por volta: o resto fica para a próxima.
-        for (0..64) |_| {
+        for (0..1024) |_| {
             var buf: [2048]u8 = undefined;
             const nr = sys.recvNow(w.udp, &buf);
             if (nr <= 0) return;
@@ -900,6 +1669,30 @@ const Worker = struct {
     /// para falar), mais 5 quadros de silêncio no fim, como o cliente oficial,
     /// e nada quando mudo, por nós ou pelo servidor.
     fn sendFrame(w: *Worker, now: i64) void {
+        if (w.v.is_stream) {
+            var sys_pcm: [frame_samples * channels]i16 = undefined;
+            if (w.v.takeStreamAudioFrame(&sys_pcm)) {
+                if (!w.speaking_now) {
+                    w.speaking_now = true;
+                    w.spurt_start = true;
+                    w.announceSpeaking();
+                }
+                const enc = w.encoder orelse return;
+                var packet: [1500]u8 = undefined;
+                const len = c.opus_encode(enc, &sys_pcm, frame_samples, &packet, packet.len);
+                if (len > 0) w.sendOpus(packet[0..@intCast(len)]);
+                return;
+            }
+            if (w.speaking_now) {
+                w.speaking_now = false;
+                w.trailing_silence = 5;
+            }
+            if (w.trailing_silence > 0) {
+                w.trailing_silence -= 1;
+                w.sendOpus(&silence);
+            }
+            return;
+        }
         const sh = &voz_audio.sh;
         const blocked = w.v.micBlocked();
         var pcm: [frame_samples * channels]i16 = undefined;
@@ -1020,11 +1813,91 @@ const Worker = struct {
     }
 
     fn onRtp(w: *Worker, buf: []const u8) void {
-        if (buf.len < 12 + 16 + 4 or !w.have_secret) return;
+        if (!w.have_secret) return;
+        if (buf.len >= 12 and (buf[0] >> 6) == 2 and (buf[1] == 205 or buf[1] == 206)) {
+            const rtcp_fmt = buf[0] & 0x1F;
+            const wants_keyframe = buf[1] == 206 and (rtcp_fmt == 1 or rtcp_fmt == 4);
+            if (wants_keyframe) {
+                video_diag.txPli();
+            } else if (buf[1] == 206 and rtcp_fmt == 15) {
+                video_diag.txRemb();
+            } else if (buf[1] == 205) {
+                video_diag.txNack();
+            }
+            if (buf.len == 12) {
+                const media_ssrc = std.mem.readInt(u32, buf[8..12], .big);
+                if (wants_keyframe and (media_ssrc == w.video_ssrc or media_ssrc == 0)) w.v.video_keyframe_req.store(true, .release);
+                return;
+            }
+            if (buf.len >= 8 + 4 + 20 and buf.len <= 1024) {
+                const cipher = buf[8 .. buf.len - 20];
+                var tag: [16]u8 = undefined;
+                @memcpy(&tag, buf[buf.len - 20 ..][0..16]);
+                var nonce: [24]u8 = @splat(0);
+                @memcpy(nonce[0..4], buf[buf.len - 4 ..]);
+                var plain: [1024]u8 = undefined;
+                const aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+                if (aead.decrypt(plain[0..cipher.len], cipher, tag, buf[0..8], nonce, w.secret)) |_| {
+                    if (cipher.len >= 4) {
+                        const media_ssrc = std.mem.readInt(u32, plain[0..4], .big);
+                        if (wants_keyframe and (media_ssrc == w.video_ssrc or media_ssrc == 0)) {
+                            w.v.video_keyframe_req.store(true, .release);
+                            dbg("recebeu RTCP pt={d} fmt={d} pedindo keyframe ssrc={d}", .{ buf[1], rtcp_fmt, media_ssrc });
+                        } else if (buf[1] == 205 and rtcp_fmt == 1 and w.tx_rtp_cache.len > 0 and (media_ssrc == w.video_ssrc or media_ssrc == 0)) {
+                            // RTCP Generic NACK: retransmite pacotes RTP perdidos imediatamente do anel local.
+                            var fci_off: usize = 4;
+                            while (fci_off + 4 <= cipher.len) : (fci_off += 4) {
+                                const pid = std.mem.readInt(u16, plain[fci_off..][0..2], .big);
+                                const blp = std.mem.readInt(u16, plain[fci_off + 2 ..][0..2], .big);
+                                const p0 = &w.tx_rtp_cache[pid & 255];
+                                if (p0.valid and p0.seq == pid) {
+                                    w.sendVideoRtpRaw(p0.payload[0..p0.len], p0.pt, p0.marker, p0.ts, p0.seq);
+                                }
+                                var b: u4 = 0;
+                                while (true) {
+                                    if ((blp & (@as(u16, 1) << b)) != 0) {
+                                        const rseq = pid +% 1 +% b;
+                                        const pr = &w.tx_rtp_cache[rseq & 255];
+                                        if (pr.valid and pr.seq == rseq) {
+                                            w.sendVideoRtpRaw(pr.payload[0..pr.len], pr.pt, pr.marker, pr.ts, pr.seq);
+                                        }
+                                    }
+                                    if (b == 15) break;
+                                    b += 1;
+                                }
+                            }
+                        } else if (buf[1] == 206 and rtcp_fmt == 15 and cipher.len >= 12 and std.mem.eql(u8, plain[4..8], "REMB")) {
+                            const exp: u6 = @intCast(plain[9] >> 2);
+                            const mantissa: u64 = (@as(u64, plain[9] & 3) << 16) | (@as(u64, plain[10]) << 8) | plain[11];
+                            if (exp <= 30) {
+                                const remb_bps = mantissa << exp;
+                                const cfg_max = @max(w.v.video_bitrate.load(.acquire), 800);
+                                const remb_kbps: u32 = @intCast(std.math.clamp(remb_bps / 1000, 600, cfg_max));
+                                const now = nowMs();
+                                if (now - w.last_remb_ms >= 400) {
+                                    w.last_remb_ms = now;
+                                    const cur = w.v.video_target_kbps.load(.acquire);
+                                    const next_kbps = if (remb_kbps < cur) (cur + remb_kbps) / 2 else (cur * 3 + remb_kbps) / 4;
+                                    w.v.video_target_kbps.store(@max(next_kbps, 600), .release);
+                                }
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+            return;
+        }
+        if (buf.len < 12 + 16 + 4) return;
         if ((buf[0] >> 6) != 2) return;
-        if ((buf[1] & 0x7f) != 120) return; // só Opus (RTCP e o resto ficam de fora)
+        const pt: u7 = @intCast(buf[1] & 0x7f);
         const ssrc = std.mem.readInt(u32, buf[8..12], .big);
-        if (ssrc == w.ssrc) return;
+        if (ssrc == w.ssrc or (w.video_ssrc != 0 and ssrc == w.video_ssrc)) return;
+        const is_audio = pt == 120;
+        const is_rtx = (pt == w.video_rtx_pt) or w.video_rtx_ssrcs.contains(ssrc) or ((pt == 97 or pt == 99) and !w.video_ssrcs.contains(ssrc));
+        if (is_rtx) return;
+        const is_video = !is_audio and (pt == w.video_pt or (pt >= 96 and w.video_ssrcs.contains(ssrc)));
+        if (!is_audio and !is_video) return;
+        if (is_video) video_diag.rxUdpPkt(pt);
         // Nos modos "rtpsize" só o cabeçalho fixo, os CSRC e os 4 bytes do
         // cabeçalho da extensão vão em claro; o corpo da extensão vai
         // cifrado junto com o áudio e sai depois de decifrar.
@@ -1057,6 +1930,13 @@ const Worker = struct {
         if (ext_words * 4 > end) return;
         var frame: []const u8 = plain[ext_words * 4 .. end];
         if (frame.len == 0) return;
+        if (is_video) {
+            const seq = std.mem.readInt(u16, buf[2..4], .big);
+            const ts = std.mem.readInt(u32, buf[4..8], .big);
+            const marker = (buf[1] & 0x80) != 0;
+            w.onVideoRtp(ssrc, seq, ts, marker, frame);
+            return;
+        }
         const src = w.sourceFor(ssrc, 0) orelse return;
         const seq = std.mem.readInt(u16, buf[2..4], .big);
         const ts = std.mem.readInt(u32, buf[4..8], .big);
@@ -1351,6 +2231,338 @@ const Worker = struct {
             s.speaking = false;
             if (s.user != 0) w.v.emit(.{ .voice_speaking = .{ .user = s.user, .speaking = false } });
         };
+    }
+
+    fn streamOwner(w: *const Worker) Id {
+        if (!w.v.is_stream or w.v.stream_key_len == 0) return 0;
+        const sk = w.v.stream_key[0..w.v.stream_key_len];
+        const last = std.mem.lastIndexOfScalar(u8, sk, ':') orelse return 0;
+        return std.fmt.parseInt(Id, sk[last + 1 ..], 10) catch 0;
+    }
+
+    fn onVideoRtp(w: *Worker, ssrc: u32, seq: u16, ts: u32, marker: bool, payload: []const u8) void {
+        var uid = w.video_ssrcs.get(ssrc) orelse 0;
+        if (uid == 0 and w.v.is_stream) uid = w.streamOwner();
+        var slot: ?*VideoRxSlot = null;
+        for (&w.video_rx) |*rx| {
+            if (rx.active and rx.ssrc == ssrc) {
+                slot = rx;
+                break;
+            }
+        }
+        if (slot == null) {
+            for (&w.video_rx) |*rx| {
+                if (!rx.active) {
+                    rx.* = .{
+                        .active = true,
+                        .ssrc = ssrc,
+                        .user = uid,
+                        .assembler = video_rtp.FrameAssembler.init(std.heap.page_allocator),
+                    };
+                    slot = rx;
+                    break;
+                }
+            }
+        }
+        const rx = slot orelse return;
+        if (uid != 0 and rx.user == 0) rx.user = uid;
+
+        switch (rx.assembler.pushH264(seq, ts, marker, payload)) {
+            .pending => {},
+            .dropped => |d| {
+                video_diag.rxAsmDrop();
+                if (d.need_pli) {
+                    const now = nowMs();
+                    if (now - rx.last_pli_ms >= 250) {
+                        rx.last_pli_ms = now;
+                        w.sendVideoPli(ssrc);
+                        if (!rx.got_keyframe) w.sendMediaSinkWants(ssrc);
+                    }
+                }
+            },
+            .frame => |au_raw| {
+                video_diag.rxAsmFrame();
+                var au = au_raw;
+                if (au.len >= 2 and au[au.len - 1] == 0xFA and au[au.len - 2] == 0xFA) {
+                    const dave = if (w.dave) |*d| d else {
+                        video_diag.rxDaveFail();
+                        return;
+                    };
+                    if (rx.user == 0) {
+                        video_diag.rxNoUid();
+                        return;
+                    }
+                    const cap = @max(au.len + 256, 256 * 1024);
+                    if (rx.dave_buf.len < cap) {
+                        const next = std.heap.page_allocator.alloc(u8, cap) catch return;
+                        if (rx.dave_buf.len > 0) std.heap.page_allocator.free(rx.dave_buf);
+                        rx.dave_buf = next;
+                    }
+                    const dec_len = dave.decryptMedia(c.DAVE_MEDIA_TYPE_VIDEO, ssrc, rx.user, au, rx.dave_buf) orelse {
+                        w.stats.undecrypted += 1;
+                        video_diag.rxDaveFail();
+                        return;
+                    };
+                    video_diag.rxDaveOk();
+                    au = rx.dave_buf[0..dec_len];
+                }
+                const is_key = hasH264Keyframe(au);
+                if (!rx.got_keyframe) {
+                    if (is_key) {
+                        rx.got_keyframe = true;
+                    } else {
+                        const now = nowMs();
+                        if (now - rx.last_pli_ms >= 250) {
+                            rx.last_pli_ms = now;
+                            w.sendVideoPli(ssrc);
+                            w.sendMediaSinkWants(ssrc);
+                        }
+                        return;
+                    }
+                }
+                const pts_us: i64 = @divTrunc(@as(i64, ts) * 1000, 90);
+                if (!w.enqueueDecode(rx.user, ssrc, pts_us, is_key, au)) {
+                    const now = nowMs();
+                    if (now - rx.last_pli_ms >= 250) {
+                        rx.last_pli_ms = now;
+                        w.sendVideoPli(ssrc);
+                    }
+                }
+            },
+        }
+    }
+
+    fn ensureDecWorker(w: *Worker) bool {
+        if (w.dec_thread != null) return true;
+        if (w.dec_mu == null) w.dec_mu = c.SDL_CreateMutex();
+        if (w.dec_cond == null) w.dec_cond = c.SDL_CreateCondition();
+        if (w.dec_mu == null or w.dec_cond == null) return false;
+        w.dec_stop.store(false, .release);
+        w.dec_thread = c.SDL_CreateThread(decThreadMain, "vdec", w);
+        return w.dec_thread != null;
+    }
+
+    fn stopDecWorker(w: *Worker) void {
+        w.dec_stop.store(true, .release);
+        if (w.dec_mu) |m| {
+            c.SDL_LockMutex(m);
+            if (w.dec_cond) |cd| c.SDL_BroadcastCondition(cd);
+            c.SDL_UnlockMutex(m);
+        }
+        if (w.dec_thread) |t| {
+            c.SDL_WaitThread(t, null);
+            w.dec_thread = null;
+        }
+        for (&w.dec_ring) |*job| {
+            if (job.buf.len > 0) std.heap.page_allocator.free(job.buf);
+            job.* = .{};
+        }
+        w.dec_head = 0;
+        w.dec_tail = 0;
+        w.dec_count = 0;
+        w.dec_wait_key = false;
+        if (w.dec_cond) |cd| {
+            c.SDL_DestroyCondition(cd);
+            w.dec_cond = null;
+        }
+        if (w.dec_mu) |m| {
+            c.SDL_DestroyMutex(m);
+            w.dec_mu = null;
+        }
+    }
+
+    fn enqueueDecode(w: *Worker, user: Id, ssrc: u32, pts_us: i64, is_key: bool, au: []const u8) bool {
+        if (au.len == 0 or !w.ensureDecWorker()) return false;
+        const mu = w.dec_mu orelse return false;
+        const cond = w.dec_cond orelse return false;
+        c.SDL_LockMutex(mu);
+        defer c.SDL_UnlockMutex(mu);
+        if (w.dec_wait_key and !is_key) return false;
+        if (w.dec_count == w.dec_ring.len) {
+            if (is_key) {
+                w.dec_head = 0;
+                w.dec_tail = 0;
+                w.dec_count = 0;
+            } else {
+                w.dec_wait_key = true;
+                return false;
+            }
+        }
+        if (is_key) w.dec_wait_key = false;
+        const job = &w.dec_ring[w.dec_tail];
+        if (job.buf.len < au.len) {
+            const next = std.heap.page_allocator.alloc(u8, @max(au.len, 256 * 1024)) catch return false;
+            if (job.buf.len > 0) std.heap.page_allocator.free(job.buf);
+            job.buf = next;
+        }
+        @memcpy(job.buf[0..au.len], au);
+        job.len = au.len;
+        job.user = user;
+        job.ssrc = ssrc;
+        job.pts_us = pts_us;
+        job.is_key = is_key;
+        w.dec_tail = (w.dec_tail + 1) % @as(u8, @intCast(w.dec_ring.len));
+        w.dec_count += 1;
+        c.SDL_SignalCondition(cond);
+        return true;
+    }
+};
+
+fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
+    const w: *Worker = @ptrCast(@alignCast(data.?));
+    const mu = w.dec_mu orelse return 0;
+    const cond = w.dec_cond orelse return 0;
+
+    var slots: [8]DecSlot = @splat(.{});
+    defer for (&slots) |*ds| if (ds.active) ds.dec.deinit();
+
+    var local_au: []u8 = &.{};
+    defer if (local_au.len > 0) std.heap.page_allocator.free(local_au);
+    var logged_first = false;
+
+    while (!w.dec_stop.load(.acquire)) {
+        const drop_uid = w.dec_drop_user.swap(0, .acq_rel);
+        if (drop_uid != 0) {
+            for (&slots) |*ds| if (ds.active and ds.user == drop_uid) {
+                ds.dec.deinit();
+                ds.* = .{};
+            };
+        }
+
+        c.SDL_LockMutex(mu);
+        while (w.dec_count == 0 and !w.dec_stop.load(.acquire)) {
+            c.SDL_WaitCondition(cond, mu);
+        }
+        if (w.dec_stop.load(.acquire)) {
+            c.SDL_UnlockMutex(mu);
+            break;
+        }
+        const job = &w.dec_ring[w.dec_head];
+        const j_len = job.len;
+        const j_user = job.user;
+        const j_ssrc = job.ssrc;
+        const j_pts = job.pts_us;
+        if (local_au.len < j_len) {
+            const next = std.heap.page_allocator.alloc(u8, @max(j_len, 256 * 1024)) catch {
+                w.dec_head = (w.dec_head + 1) % @as(u8, @intCast(w.dec_ring.len));
+                w.dec_count -= 1;
+                c.SDL_UnlockMutex(mu);
+                continue;
+            };
+            if (local_au.len > 0) std.heap.page_allocator.free(local_au);
+            local_au = next;
+        }
+        @memcpy(local_au[0..j_len], job.buf[0..j_len]);
+        w.dec_head = (w.dec_head + 1) % @as(u8, @intCast(w.dec_ring.len));
+        w.dec_count -= 1;
+        c.SDL_UnlockMutex(mu);
+
+        var target: ?*DecSlot = null;
+        for (&slots) |*ds| {
+            if (ds.active and ds.ssrc == j_ssrc) {
+                if (j_user != 0) ds.user = j_user;
+                target = ds;
+                break;
+            }
+        }
+        if (target == null) {
+            for (&slots) |*ds| {
+                if (!ds.active) {
+                    const dec = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch break;
+                    ds.* = .{ .active = true, .ssrc = j_ssrc, .user = j_user, .dec = dec };
+                    target = ds;
+                    break;
+                }
+            }
+        }
+        if (target) |ds| {
+            video_diag.rxDecIn();
+            if (ds.dec.decode(local_au[0..j_len], j_pts)) |maybe_df| {
+                if (maybe_df) |df| {
+                    video_diag.rxDecOut(ds.dec.hw, ds.dec.last_hr, df.width, df.height);
+                    if (!logged_first) {
+                        logged_first = true;
+                        dbg("primeiro quadro de vídeo decodificado peer={d} {d}x{d} stream={}", .{ j_user, df.width, df.height, w.v.is_stream });
+                    }
+                    c.SDL_LockMutex(w.v.video_mu);
+                    const cb = w.v.on_video_frame;
+                    const ctx = w.v.on_video_ctx;
+                    c.SDL_UnlockMutex(w.v.video_mu);
+                    if (cb) |f| {
+                        f(ctx, j_user, w.v.is_stream, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, nowMs());
+                    } else {
+                        media_bridge.deliverRemote(j_user, w.v.is_stream, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, nowMs());
+                    }
+                } else {
+                    video_diag.rxDecErr(ds.dec.hw, ds.dec.last_hr);
+                }
+            } else |_| {
+                video_diag.rxDecErr(ds.dec.hw, ds.dec.last_hr);
+            }
+        }
+    }
+    return 0;
+}
+
+const RtpPktSlot = struct {
+    payload: [1280]u8 = undefined,
+    len: u16 = 0,
+    seq: u16 = 0,
+    ts: u32 = 0,
+    pt: u7 = 101,
+    marker: bool = false,
+    valid: bool = false,
+};
+
+const VideoTxPkt = struct {
+    buf: []u8 = &.{},
+    len: usize = 0,
+    pts_us: i64 = 0,
+    codec: video_cfg.Codec = .h264,
+    is_key: bool = false,
+};
+
+const DecJob = struct {
+    ssrc: u32 = 0,
+    user: Id = 0,
+    pts_us: i64 = 0,
+    is_key: bool = false,
+    len: usize = 0,
+    buf: []u8 = &.{},
+};
+
+const DecSlot = struct {
+    active: bool = false,
+    ssrc: u32 = 0,
+    user: Id = 0,
+    dec: capture_backend.HwDecoder = undefined,
+};
+
+fn hasH264Keyframe(au: []const u8) bool {
+    var nals: [32][]const u8 = undefined;
+    const count = video_rtp.splitAnnexBNals(au, &nals);
+    for (nals[0..count]) |nal| {
+        if (nal.len == 0) continue;
+        const nt = nal[0] & 0x1F;
+        if (nt == 5 or nt == 7) return true;
+    }
+    return false;
+}
+
+const VideoRxSlot = struct {
+    active: bool = false,
+    got_keyframe: bool = false,
+    ssrc: u32 = 0,
+    user: Id = 0,
+    last_pli_ms: i64 = 0,
+    assembler: video_rtp.FrameAssembler = video_rtp.FrameAssembler.init(std.heap.page_allocator),
+    dave_buf: []u8 = &.{},
+
+    fn deinit(rx: *VideoRxSlot) void {
+        if (!rx.active) return;
+        rx.assembler.deinit();
+        if (rx.dave_buf.len > 0) std.heap.page_allocator.free(rx.dave_buf);
+        rx.* = .{};
     }
 };
 
@@ -1688,16 +2900,24 @@ const Dave = struct {
     }
 
     fn encrypt(d: *Dave, ssrc: u32, frame: []const u8, out: []u8) usize {
-        const cap = c.daveEncryptorGetMaxCiphertextByteSize(d.encryptor, c.DAVE_MEDIA_TYPE_AUDIO, frame.len);
+        return d.encryptMedia(c.DAVE_MEDIA_TYPE_AUDIO, ssrc, frame, out);
+    }
+
+    fn encryptMedia(d: *Dave, media_type: c.DAVEMediaType, ssrc: u32, frame: []const u8, out: []u8) usize {
+        const cap = c.daveEncryptorGetMaxCiphertextByteSize(d.encryptor, media_type, frame.len);
         if (cap > out.len) return 0;
         var written: usize = 0;
-        const rc = c.daveEncryptorEncrypt(d.encryptor, c.DAVE_MEDIA_TYPE_AUDIO, ssrc, frame.ptr, frame.len, out.ptr, out.len, &written);
+        const rc = c.daveEncryptorEncrypt(d.encryptor, media_type, ssrc, frame.ptr, frame.len, out.ptr, out.len, &written);
         if (rc != c.DAVE_ENCRYPTOR_RESULT_CODE_SUCCESS) return 0;
         return written;
     }
 
     fn decrypt(d: *Dave, ssrc: u32, user: Id, frame: []const u8, out: []u8) ?usize {
-        // O decryptor aparece quando o SSRC é anunciado (op 5); se o áudio
+        return d.decryptMedia(c.DAVE_MEDIA_TYPE_AUDIO, ssrc, user, frame, out);
+    }
+
+    fn decryptMedia(d: *Dave, media_type: c.DAVEMediaType, ssrc: u32, user: Id, frame: []const u8, out: []u8) ?usize {
+        // O decryptor aparece quando o SSRC é anunciado (op 5 / op 12); se a mídia
         // chegou antes e já sabemos de quem é, cria agora.
         if (d.decryptors.get(ssrc) == null) {
             const owner = d.ssrc_users.get(ssrc) orelse user;
@@ -1705,10 +2925,10 @@ const Dave = struct {
             d.setSsrcUser(ssrc, owner);
         }
         const dec = d.decryptors.get(ssrc) orelse return null;
-        const cap = c.daveDecryptorGetMaxPlaintextByteSize(dec, c.DAVE_MEDIA_TYPE_AUDIO, frame.len);
+        const cap = c.daveDecryptorGetMaxPlaintextByteSize(dec, media_type, frame.len);
         if (cap > out.len) return null;
         var written: usize = 0;
-        const rc = c.daveDecryptorDecrypt(dec, c.DAVE_MEDIA_TYPE_AUDIO, frame.ptr, frame.len, out.ptr, out.len, &written);
+        const rc = c.daveDecryptorDecrypt(dec, media_type, frame.ptr, frame.len, out.ptr, out.len, &written);
         if (rc != c.DAVE_DECRYPTOR_RESULT_CODE_SUCCESS) return null;
         return written;
     }
@@ -1716,5 +2936,9 @@ const Dave = struct {
     fn setLocalSsrc(d: *Dave, ssrc: u32) void {
         d.local_ssrc = ssrc;
         if (d.encryptor != null) c.daveEncryptorAssignSsrcToCodec(d.encryptor, ssrc, c.DAVE_CODEC_OPUS);
+    }
+
+    fn setLocalVideoSsrc(d: *Dave, ssrc: u32, codec: c.DAVECodec) void {
+        if (d.encryptor != null and ssrc != 0) c.daveEncryptorAssignSsrcToCodec(d.encryptor, ssrc, codec);
     }
 };

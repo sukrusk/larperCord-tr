@@ -14,7 +14,45 @@ const UrlPair = @import("media_refresh.zig").Pair;
 const moderacao = @import("moderacao.zig");
 const entrada = @import("entrada.zig");
 const interaction = @import("interaction.zig");
+pub const video_cfg = @import("video_cfg.zig");
 const Id = types.Id;
+
+pub const StreamInfo = struct {
+    channel: Id,
+    guild: Id = 0,
+    owner: Id,
+    active: bool = true,
+    source: video_cfg.SourceKind = .screen,
+    width: u16 = 3840,
+    height: u16 = 2160,
+    fps: u8 = 60,
+    codec: video_cfg.Codec = .h264,
+    has_audio: bool = true,
+    remote_perm: video_cfg.RemotePerm = .off,
+    paused: bool = false,
+    stream_key: [96]u8 = @splat(0),
+    stream_key_len: u8 = 0,
+
+    pub fn keySlice(s: *const StreamInfo) []const u8 {
+        return s.stream_key[0..@min(s.stream_key_len, s.stream_key.len)];
+    }
+
+    pub fn fromKey(k: []const u8) struct { buf: [96]u8, len: u8 } {
+        var buf: [96]u8 = @splat(0);
+        const n: u8 = @intCast(@min(k.len, buf.len));
+        @memcpy(buf[0..n], k[0..n]);
+        return .{ .buf = buf, .len = n };
+    }
+};
+
+pub const RemoteCtrlStatus = enum(u8) {
+    idle,
+    pending_out,
+    pending_in,
+    active_host,
+    active_viewer,
+    denied,
+};
 
 pub const Ready = struct {
     me: Id,
@@ -175,6 +213,10 @@ pub const Event = union(enum) {
     voice_ping: u32,
     /// O microfone ou a saída da call abriram? (a barra de voz avisa)
     voice_audio: struct { mic_ok: bool, out_ok: bool },
+    stream_update: StreamInfo,
+    stream_metrics: struct { owner: Id, metrics: video_cfg.StreamMetrics },
+    remote_ctrl_request: struct { peer: Id, perm: video_cfg.RemotePerm, pin: u32 = 0, port: u16 = 0 },
+    remote_ctrl_state: struct { peer: Id, status: RemoteCtrlStatus, perm: video_cfg.RemotePerm = .off },
     /// CALL_CREATE / CALL_UPDATE / CALL_DELETE de uma DM ou grupo.
     call: Call,
     /// CHANNEL_INFO (resposta ao op 43): os canais de voz do servidor que têm call
@@ -276,7 +318,9 @@ pub const VoiceFlags = packed struct(u8) {
     suppress: bool = false,
     /// Transmitindo a tela (`self_stream`): a tela da call mostra só o selo AO VIVO.
     self_stream: bool = false,
-    _pad: u2 = 0,
+    /// Câmera ligada (`self_video`).
+    self_video: bool = false,
+    _pad: u1 = 0,
 
     pub fn serverMuted(f: VoiceFlags) bool {
         return f.mute or f.suppress;
@@ -379,6 +423,15 @@ pub const Command = union(enum) {
     voice_volume: struct { user: Id, volume: f32 },
     /// "Tirar ruído" e "Igualar volume" de uma pessoa (mixer da call).
     voice_dsp: struct { user: Id, denoise: bool, level: bool },
+    start_video: video_cfg.StreamConfig,
+    stop_video,
+    start_stream: video_cfg.StreamConfig,
+    stop_stream,
+    watch_stream: struct { channel: Id, guild: Id = 0, owner: Id, watch: bool },
+    remote_ctrl_request: struct { peer: Id, perm: video_cfg.RemotePerm },
+    remote_ctrl_respond: struct { peer: Id, perm: video_cfg.RemotePerm },
+    remote_ctrl_stop: Id,
+    remote_ctrl_input: video_cfg.RemoteInputPacket,
     /// Call de DM/grupo: toca para os outros (POST .../call/ring) ou para de
     /// tocar só para nós, que é recusar (POST .../call/stop-ringing).
     call_ring: Id,
@@ -523,6 +576,14 @@ pub const Action = union(enum) {
     start_call: Id,
     accept_call,
     decline_call,
+    toggle_camera,
+    open_stream_picker,
+    start_screen_share: video_cfg.StreamConfig,
+    stop_screen_share,
+    watch_stream: Id,
+    request_remote_ctrl: struct { peer: Id, perm: video_cfg.RemotePerm },
+    respond_remote_ctrl: struct { peer: Id, perm: video_cfg.RemotePerm },
+    stop_remote_ctrl,
     typing: Id,
     toggle_category: Id,
     set_theme: usize,

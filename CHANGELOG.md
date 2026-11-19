@@ -1,5 +1,22 @@
 # What changed in each version
 
+## 0.6.8
+
+**Single EXE & auto-update**
+- Windows releases now ship and default (`-Dsingle-exe=true`) to a single standalone `larpercord.exe` with SDL3, libcurl (HTTP/2, Brotli, Zstd) and OpenSSL compiled in — no external `SDL3.dll`, `libcurl-x64.dll` or `libcrypto-3-x64.dll` files required.
+- Updater connected to `sukrusk/larperCord-tr` with `auto_update` enabled by default and HTTPS + SHA-256 verification (`SHA256SUMS` or GitHub API asset digest) so new GitHub releases download and install cleanly in background.
+
+**Turkish & theme parity**
+- Complete Turkish (`tr`) interface translation covering 2,160+ UI, settings, date/time, theme option and changelog strings (`CHANGELOG.tr.md`).
+- Live camera grid tiles and voice-bar camera/share controls added across all 11 built-in themes (`terminal`, `subsolo`, `zen` and `editorial` included).
+
+**Video, camera & remote**
+- Fixed Windows teardown heap corruption (`0xc0000374`) by synchronizing `remote_ctrl` stop/threads and ordering COM `Loopback.deinit()` teardown cleanly after capture/encoder release.
+- Made remote-control consent banners clickable above DM fullscreen stage and DPI-scaled mouse coordinates accurately (`uiScale`).
+- Fixed remote peer camera frames stalling at `receiving frames…` via `onVideoSinks` inactive SSRC fallback retention and multi-SSRC `media_sink_wants`.
+- Added UDP video TX pacing, 256-slot RTCP Generic NACK retransmission, smoothed RTCP REMB bitrate adaptation, 2-second keyframe GOPs, and software MFT encoder fallback.
+- Added scrollable 24-entry `.exe` Application / Window stream picker and Windows 10/11 WASAPI Process Loopback audio isolation (`VAD\Process_Loopback`) — capturing only the chosen app in Window mode and excluding self Discord voice PID in Screen mode to eliminate echo.
+
 ## 0.6.7
 
 **Floating window**

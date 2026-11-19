@@ -52,7 +52,7 @@ layout {
                     spacer height=28
                 }
             }
-            status-bar height=30 variant=plain when=status items="me mic deaf voice spacer conn theme ram clock"
+            status-bar height=30 variant=plain when=status items="me mic deaf cam share voice spacer conn theme ram clock"
         }
     }
     }

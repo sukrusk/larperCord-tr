@@ -81,7 +81,9 @@ fn profAdd(name: []const u8, us: u64) void {
 /// `label text="larperCord" size=14 weight=bold color=accent align=center`
 fn label(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
     if (ctx.th.nodeFx(n)) |x| if (x.text) |tx| return display.label(ctx, n, r, tx);
-    const t = d.pstr(n, "text", "");
+    const pt = d.pstr(n, "text", "");
+    const en = d.pstr(n, "text-en", "");
+    const t = if (en.len > 0) i18n.tr(pt, en) else pt;
     const fam = ctx.familyFor(n);
     const weight = std.meta.stringToEnum(d.Weight, d.pstr(n, "weight", "semibold")) orelse .semibold;
     const font = fam.get(weight);
@@ -179,6 +181,7 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
     @import("autocomplete.zig").draw(ctx);
     c.ImGui_End();
 
+    @import("stream_view.zig").modalStage(ctx);
     const t1 = if (profile) c.SDL_GetTicksNS() else 0;
     // O popup aberto na janela flutuante é desenhado lá (app_flutuante.zig).
     popup.claim(ctx.st, false);
@@ -202,6 +205,7 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
     @import("mascote_pet.zig").draw(ctx);
     // Chamada chegando: por cima de tudo, em qualquer tema.
     @import("chamada.zig").overlay(ctx);
+    @import("stream_view.zig").overlay(ctx);
     shortcuts(ctx);
     // A conversão do IME num campo que não é a caixa do chat: por cima de tudo, no cursor dele.
     @import("ime.zig").floating(ctx);

@@ -79,6 +79,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .en => 2,
         .ja => 3,
         .ru => 4,
+        .tr => 5,
     };
     a.opts.mode = null;
     a.opts.lang = null;

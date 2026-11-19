@@ -319,13 +319,18 @@ pub const months_en = [_][]const u8{ "January", "February", "March", "April", "M
 pub const months_ja = [_][]const u8{ "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月" };
 /// No genitivo, como na data: "9 ноября 2026 г.".
 pub const months_ru = [_][]const u8{ "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+pub const months_tr = [_][]const u8{ "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık" };
 
 /// Nome do mês (1..12) no idioma da interface.
 pub fn monthName(m: anytype) []const u8 {
     const i: usize = @intCast(m - 1);
-    if (i18n.current() == .ja) return months_ja[i];
-    if (i18n.current() == .ru) return months_ru[i];
-    return if (i18n.en()) months_en[i] else months[i];
+    return switch (i18n.current()) {
+        .ja => months_ja[i],
+        .ru => months_ru[i],
+        .tr => months_tr[i],
+        .en => months_en[i],
+        .pt => months[i],
+    };
 }
 
 /// Data por extenso: "3 de novembro de 2026" / "November 3, 2026".
@@ -365,6 +370,7 @@ pub fn fullDate(buf: []u8, ts: i64) []const u8 {
     const days_en = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
     const days_ja = [_][]const u8{ "日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日" };
     const days_ru = [_][]const u8{ "воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота" };
+    const days_tr = [_][]const u8{ "Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi" };
     // 1º de janeiro de 1970 foi uma quinta.
     const wd: usize = @intCast(@mod(t.day_index + 4, 7));
     var cb: [16]u8 = undefined;
@@ -376,7 +382,12 @@ pub fn fullDate(buf: []u8, ts: i64) []const u8 {
         const date2 = std.fmt.bufPrint(&db2, "{d}年{d}月{d}日", .{ t.year, t.month, t.day }) catch "";
         return std.fmt.bufPrint(buf, "{s} {s} {s}", .{ days_ja[wd], date2, hm }) catch "";
     }
-    const day_name = if (i18n.current() == .ru) days_ru[wd] else if (i18n.en()) days_en[wd] else days[wd];
+    const day_name = switch (i18n.current()) {
+        .ru => days_ru[wd],
+        .tr => days_tr[wd],
+        .en, .ja => days_en[wd],
+        .pt => days[wd],
+    };
     return i18n.fmt(buf, "{s}, {s} às {s}", "{s}, {s} at {s}", .{ day_name, date, hm });
 }
 

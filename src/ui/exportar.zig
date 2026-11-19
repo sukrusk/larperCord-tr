@@ -712,6 +712,7 @@ fn buildPlan(ctx: *d.Ctx, req: ExportReq, path_in: []const u8) ?job_mod.Plan {
                 .en => "en",
                 .ja => "ja",
                 .ru => "ru",
+                .tr => "tr",
             },
             .conversation = .{
                 .id = req.channel,
