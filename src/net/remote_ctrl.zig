@@ -13,7 +13,7 @@ const is_win = builtin.os.tag == .windows;
 const win_inject = if (is_win) @import("../platform/win/input_inject.zig") else struct {
     pub const Injector = struct {
         pub fn init(_: u64) !Injector {
-            return .{};
+            return error.NotImplementedOnLinuxYet;
         }
         pub fn apply(_: *Injector, _: video_cfg.RemoteInputPacket, _: video_cfg.RemotePerm) void {}
         pub fn releaseAll(_: *Injector) void {}
@@ -395,7 +395,7 @@ pub const Manager = struct {
 
 fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
     const self: *Manager = @ptrCast(@alignCast(data.?));
-    var inj = win_inject.Injector.init(self.target_hwnd) catch null;
+    var inj: ?win_inject.Injector = win_inject.Injector.init(self.target_hwnd) catch null;
     defer if (inj) |*i| i.deinit();
 
     var wire: [2048]u8 = undefined;

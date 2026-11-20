@@ -59,6 +59,8 @@ pub const Loopback = struct {
 
 pub const HwEncoder = struct {
     hw: bool = false,
+    force_cpu_buf: bool = true,
+    last_hr: u32 = 0,
     pub fn open(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque) !HwEncoder {
         _ = .{ codec, w, h, fps, bitrate_kbps, d3d11_dev };
         return error.NotImplementedOnLinuxYet;
@@ -84,6 +86,7 @@ pub const HwEncoder = struct {
 
 pub const HwDecoder = struct {
     hw: bool = false,
+    last_hr: u32 = 0,
     pub fn open(codec: video_cfg.Codec, w: u16, h: u16, d3d11_dev: ?*anyopaque) !HwDecoder {
         _ = .{ codec, w, h, d3d11_dev };
         return error.NotImplementedOnLinuxYet;
