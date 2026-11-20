@@ -250,7 +250,7 @@ fn packU32Pair(hi: u32, lo: u32) u64 {
     return (@as(u64, hi) << 32) | lo;
 }
 
-fn buildVideoMediaType(api: *const MfApi, subtype: GUID, w: u16, h: u16, fps: u8, bitrate_bps: ?u32) !*anyopaque {
+fn buildVideoMediaType(api: *const MfApi, subtype: GUID, w: u16, h: u16, fps: u8, bitrate_bps: ?u32, h264_profile: ?UINT) !*anyopaque {
     var mt: ?*anyopaque = null;
     if (!com.succeeded(api.create_mt(&mt)) or mt == null) return error.CreateMediaTypeFailed;
     errdefer com.release(mt);
@@ -266,6 +266,7 @@ fn buildVideoMediaType(api: *const MfApi, subtype: GUID, w: u16, h: u16, fps: u8
     // MFVideoInterlace_Progressive = 2.
     _ = set_u32(mt.?, &com.MF_MT_INTERLACE_MODE, 2);
     if (bitrate_bps) |bps| _ = set_u32(mt.?, &com.MF_MT_AVG_BITRATE, bps);
+    if (h264_profile) |prof| _ = set_u32(mt.?, &com.MF_MT_MPEG2_PROFILE, prof);
     return mt.?;
 }
 
@@ -378,12 +379,25 @@ pub const HwEncoder = struct {
             _ = set_val(capi, &com.CODECAPI_AVLowLatencyMode, &ll);
         }
 
-        const out_mt = try buildVideoMediaType(&api, sub, w, h, fps, self.bitrate_kbps * 1000);
-        defer com.release(out_mt);
         const set_out = com.slot(self.mft.?, 16, *const fn (*anyopaque, DWORD, ?*anyopaque, DWORD) callconv(.winapi) HRESULT);
-        if (!com.succeeded(set_out(self.mft.?, self.out_id, out_mt, 0))) return error.SetOutputTypeFailed;
+        const h264_profiles: [3]?UINT = if (eff_codec == .h264)
+            // Discord WebRTC/OpenH264 negocia profile-level-id=42e01f (Constrained Baseline = 256, fallback Base = 66).
+            .{ 256, 66, null }
+        else
+            .{ null, null, null };
+        var out_ok = false;
+        for (h264_profiles) |prof| {
+            const out_mt = try buildVideoMediaType(&api, sub, w, h, fps, self.bitrate_kbps * 1000, prof);
+            defer com.release(out_mt);
+            if (com.succeeded(set_out(self.mft.?, self.out_id, out_mt, 0))) {
+                out_ok = true;
+                break;
+            }
+            if (eff_codec != .h264) break;
+        }
+        if (!out_ok) return error.SetOutputTypeFailed;
 
-        const in_mt = try buildVideoMediaType(&api, com.MFVideoFormat_NV12, w, h, fps, null);
+        const in_mt = try buildVideoMediaType(&api, com.MFVideoFormat_NV12, w, h, fps, null, null);
         defer com.release(in_mt);
         const set_in = com.slot(self.mft.?, 15, *const fn (*anyopaque, DWORD, ?*anyopaque, DWORD) callconv(.winapi) HRESULT);
         if (!com.succeeded(set_in(self.mft.?, self.in_id, in_mt, 0))) return error.SetInputTypeFailed;
@@ -819,7 +833,7 @@ pub const HwDecoder = struct {
             _ = set_val(capi, &com.CODECAPI_AVLowLatencyMode, &ll);
         }
 
-        const in_mt = try buildVideoMediaType(&api, sub, self.w, self.h, 60, null);
+        const in_mt = try buildVideoMediaType(&api, sub, self.w, self.h, 60, null, null);
         defer com.release(in_mt);
         const set_in = com.slot(self.mft.?, 15, *const fn (*anyopaque, DWORD, ?*anyopaque, DWORD) callconv(.winapi) HRESULT);
         if (!com.succeeded(set_in(self.mft.?, self.in_id, in_mt, 0))) return error.SetDecoderInputFailed;

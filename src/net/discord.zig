@@ -4081,9 +4081,9 @@ pub const Gateway = struct {
     fn tryStartStreamVoice(g: *Gateway) void {
         if (sys.web) return;
         if (g.stream_voice != null or g.stream_key_len == 0 or g.voice_channel == 0 or g.me == 0) return;
-        if (g.stream_endpoint_len == 0 or g.stream_token_len == 0 or g.voice_session_len == 0) return;
+        if (g.stream_rtc_server == 0 or g.stream_endpoint_len == 0 or g.stream_token_len == 0 or g.voice_session_len == 0) return;
         const sv = alloc.create(voice_mod.Voice) catch return;
-        const rtc_srv = if (g.stream_rtc_server != 0) g.stream_rtc_server else g.voice_guild;
+        const rtc_srv = g.stream_rtc_server;
         const rtc_ch = if (g.stream_rtc_channel != 0 and g.stream_rtc_channel != g.voice_channel)
             g.stream_rtc_channel
         else if (rtc_srv > 0)
@@ -4118,9 +4118,9 @@ pub const Gateway = struct {
     fn tryStartWatchVoice(g: *Gateway) void {
         if (sys.web) return;
         if (g.watch_voice != null or g.watch_key_len == 0 or g.voice_channel == 0 or g.me == 0) return;
-        if (g.watch_endpoint_len == 0 or g.watch_token_len == 0 or g.voice_session_len == 0) return;
+        if (g.watch_rtc_server == 0 or g.watch_endpoint_len == 0 or g.watch_token_len == 0 or g.voice_session_len == 0) return;
         const wv = alloc.create(voice_mod.Voice) catch return;
-        const rtc_srv = if (g.watch_rtc_server != 0) g.watch_rtc_server else g.voice_guild;
+        const rtc_srv = g.watch_rtc_server;
         const rtc_ch = if (g.watch_rtc_channel != 0 and g.watch_rtc_channel != g.voice_channel)
             g.watch_rtc_channel
         else if (rtc_srv > 0)

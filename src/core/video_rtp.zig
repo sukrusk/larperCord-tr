@@ -475,6 +475,57 @@ pub fn buildRtcpNack(out: *[16]u8, sender_ssrc: u32, media_ssrc: u32, pid: u16, 
     std.mem.writeInt(u16, out[14..16], blp, .big);
 }
 
+/// Calcula timestamp abs-send-time de 24 bits (formato 6.18 em segundos, WebRTC RFC/draft).
+pub fn absSendTime24(mono_us: u64) u24 {
+    const ticks: u64 = (mono_us << 18) / 1_000_000;
+    return @truncate(ticks);
+}
+
+/// Monta corpo da extensão RTP one-byte (`0xBEDE`, 4 palavras = 16 bytes) para vídeo do Discord:
+///   - ID 3:  abs-send-time (3 bytes)
+///   - ID 6:  playout-delay min=0 max=100ms (3 bytes)
+///   - ID 7:  video-content-type (1 byte: 0 câmera, 1 tela)
+///   - ID 11/12: rid / repaired-rid "100" (3 bytes)
+pub fn buildVideoExt(out: *[16]u8, abs_send_time_24: u24, is_screen: bool, is_rtx: bool) void {
+    out[0] = 0x32; // ID=3, L=2 (3 bytes)
+    out[1] = @intCast((abs_send_time_24 >> 16) & 0xFF);
+    out[2] = @intCast((abs_send_time_24 >> 8) & 0xFF);
+    out[3] = @intCast(abs_send_time_24 & 0xFF);
+
+    out[4] = 0x62; // ID=6, L=2 (3 bytes: 12b min=0, 12b max=10 => 0..100ms)
+    out[5] = 0x00;
+    out[6] = 0x00;
+    out[7] = 0x0A;
+
+    out[8] = 0x70; // ID=7, L=0 (1 byte)
+    out[9] = if (is_screen) 1 else 0;
+
+    out[10] = if (is_rtx) 0xC2 else 0xB2; // ID=11 (rid) / ID=12 (repaired-rid), L=2 (3 bytes)
+    out[11] = '1';
+    out[12] = '0';
+    out[13] = '0';
+
+    out[14] = 0x00;
+    out[15] = 0x00;
+}
+
+/// Monta um pacote RTCP Sender Report (PT=200) de 28 bytes (RFC 3550).
+pub fn buildRtcpSr(out: *[28]u8, sender_ssrc: u32, unix_ms: u64, rtp_ts: u32, pkt_count: u32, octet_count: u32) void {
+    const ntp_epoch_offset: u64 = 2_208_988_800; // 1900 -> 1970 em segundos
+    const ntp_sec: u32 = @truncate((unix_ms / 1000) +% ntp_epoch_offset);
+    const rem_ms: u64 = unix_ms % 1000;
+    const ntp_frac: u32 = @truncate((rem_ms << 32) / 1000);
+    out[0] = 0x80; // V=2, P=0, RC=0
+    out[1] = 200; // SR
+    std.mem.writeInt(u16, out[2..4], 6, .big); // length in 32-bit words - 1
+    std.mem.writeInt(u32, out[4..8], sender_ssrc, .big);
+    std.mem.writeInt(u32, out[8..12], ntp_sec, .big);
+    std.mem.writeInt(u32, out[12..16], ntp_frac, .big);
+    std.mem.writeInt(u32, out[16..20], rtp_ts, .big);
+    std.mem.writeInt(u32, out[20..24], pkt_count, .big);
+    std.mem.writeInt(u32, out[24..28], octet_count, .big);
+}
+
 // ---------------------------------------------------------------------------
 // Testes
 // ---------------------------------------------------------------------------
@@ -587,4 +638,31 @@ test "reordenação quando pacote #0 (FU-A start) chega após continuação e pa
     const out = asm_dec.pushH264(100, 20000, false, &[_]u8{ 0x7C, 0x85, 0xAA });
     try t.expect(out == .frame);
     try t.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 1, 0x65, 0xAA, 0xBB }, out.frame);
+}
+
+test "extensões RTP Discord 0xBEDE e RTCP SR" {
+    var ext: [16]u8 = undefined;
+    buildVideoExt(&ext, 0x123456, true, false);
+    try t.expectEqual(@as(u8, 0x32), ext[0]);
+    try t.expectEqual(@as(u8, 0x62), ext[4]);
+    try t.expectEqual(@as(u8, 0x70), ext[8]);
+    try t.expectEqual(@as(u8, 1), ext[9]);
+    try t.expectEqualSlices(u8, &[_]u8{ 0xB2, '1', '0', '0' }, ext[10..14]);
+
+    var pkt: [16 + 16 + 4]u8 = undefined;
+    (RtpHeader{ .marker = true, .payload_type = 101, .seq = 7, .timestamp = 9000, .ssrc = 1234 }).write(pkt[0..12]);
+    pkt[0] |= 0x10;
+    @memcpy(pkt[12..16], &[_]u8{ 0xBE, 0xDE, 0x00, 0x04 });
+    @memcpy(pkt[16..32], &ext);
+    @memcpy(pkt[32..36], &[_]u8{ 0x65, 0xAA, 0xBB, 0xCC });
+    const parsed = RtpHeader.parse(&pkt).?;
+    try t.expectEqual(@as(usize, 32), parsed.payload_off);
+    try t.expectEqual(@as(u7, 101), parsed.hdr.payload_type);
+    try t.expect(parsed.hdr.marker);
+
+    var sr: [28]u8 = undefined;
+    buildRtcpSr(&sr, 0xAABBCCDD, 1_700_000_000_500, 90000, 10, 12000);
+    try t.expectEqual(@as(u8, 200), sr[1]);
+    try t.expectEqual(@as(u32, 0xAABBCCDD), std.mem.readInt(u32, sr[4..8], .big));
+    try t.expectEqual(@as(u32, 10), std.mem.readInt(u32, sr[20..24], .big));
 }

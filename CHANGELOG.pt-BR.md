@@ -1,5 +1,13 @@
 # O que mudou em cada versão
 
+## 0.6.9
+
+**Câmera, tela e compatibilidade oficial**
+- Corrigido o travamento na inicialização DAVE E2EE (`OP 25` armazenado em buffer antes do `OP 4` SessionDescription) e corrigido o `group_id` MLS de Go Live (`rtc_server_id - 1` mesmo com `rtc_channel_id` diferente, aguardando `STREAM_CREATE` antes de abrir a voz).
+- Adicionadas extensões de cabeçalho RTP `0xBEDE` do Discord (`abs-send-time`, `playout-delay`, `video-content-type`, `rid`), retransmissão RFC 4588 RTX (`video_rtx_ssrc` + `repaired-rid`) e RTCP Sender Reports a cada 5 s para clientes oficiais de desktop e web receberem câmera e tela.
+- Encoders H.264 Media Foundation no Windows passam a solicitar Constrained Baseline (`profile-level-id=42e01f`), além de `OP 12` `"video"` conforme o cliente oficial (`streams: []` ao parar) e `SOUNDSHARE` (`speaking=2`) no Go Live.
+- Aprimoradas as transições de época DAVE (`OP 24`, limpeza da fila pré-DAVE + pedido de keyframe) e adicionado diagnóstico `skip` e `merr` em `video_diag.log`.
+
 ## 0.6.8
 
 **Executável único e updates**

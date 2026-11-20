@@ -1,5 +1,13 @@
 # What changed in each version
 
+## 0.6.9
+
+**Camera, screen share & official Discord compatibility**
+- Fixed DAVE E2EE startup deadlock (`OP 25` external sender package buffered when arriving before `OP 4` SessionDescription) and corrected Go Live MLS `group_id` (`rtc_server_id - 1` even when `rtc_channel_id` differs, while waiting for `STREAM_CREATE` before opening voice).
+- Added native Discord `0xBEDE` RTP header extensions (`abs-send-time`, `playout-delay`, `video-content-type`, `rid`), RFC 4588 RTX retransmissions (`video_rtx_ssrc` + `repaired-rid`), and 5-second RTCP Sender Reports so official desktop and web Discord clients decode outgoing camera and screen streams.
+- Windows H.264 Media Foundation encoders now request Constrained Baseline (`profile-level-id=42e01f`), alongside spec-compliant `OP 12` `"video"` signaling (clearing streams with `[]` on stop) and `SOUNDSHARE` (`speaking=2`) for Go Live.
+- Improved DAVE epoch transitions (`OP 24`, pre-DAVE queue flush + keyframe request) and expanded `video_diag.log` with `skip` bitmask and MLS `merr` counters.
+
 ## 0.6.8
 
 **Single EXE & auto-update**

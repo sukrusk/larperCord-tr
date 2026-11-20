@@ -253,6 +253,23 @@ pub fn runSelfProbe() void {
                 .uv_pitch = 1920,
                 .pts_us = 16667,
             };
+            const SpsScan = struct {
+                fn find(data: []const u8) ?[3]u8 {
+                    var i: usize = 0;
+                    while (i + 7 < data.len) : (i += 1) {
+                        const sc: usize = if (i + 4 < data.len and data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 0 and data[i + 3] == 1)
+                            4
+                        else if (data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 1)
+                            3
+                        else
+                            0;
+                        if (sc > 0 and i + sc + 3 < data.len and (data[i + sc] & 0x1F) == 7) {
+                            return data[i + sc + 1 ..][0..3].*;
+                        }
+                    }
+                    return null;
+                }
+            };
             inline for ([_]video_cfg.Codec{ .h264, .hevc, .av1 }) |cc| {
                 if (win_mf.HwEncoder.open(cc, 1920, 1080, 60, 8000, null)) |enc_in| {
                     var enc = enc_in;
@@ -265,6 +282,7 @@ pub fn runSelfProbe() void {
                     };
                     defer if (dec) |*d| d.deinit();
                     var enc_bytes: usize = 0;
+                    var sps_hdr: ?[3]u8 = null;
                     var dec_ok = false;
                     var k: usize = 0;
                     while (k < 10 and !dec_ok) : (k += 1) {
@@ -272,6 +290,7 @@ pub fn runSelfProbe() void {
                         fr.pts_us = @intCast((k + 1) * 16667);
                         if (enc.encode(fr) catch null) |pkt| {
                             if (pkt.data.len > 0) enc_bytes = pkt.data.len;
+                            if (cc == .h264 and sps_hdr == null) sps_hdr = SpsScan.find(pkt.data);
                             if (dec) |*dc| {
                                 if (dc.decode(pkt.data, pkt.pts_us) catch null) |df| {
                                     dec_ok = df.width >= 1920 and df.height >= 1080;
@@ -284,6 +303,7 @@ pub fn runSelfProbe() void {
                         while (d_tries < 4 and !dec_ok) : (d_tries += 1) {
                             if (enc.drain(d_tries == 0)) |pkt| {
                                 if (pkt.data.len > 0) enc_bytes = pkt.data.len;
+                                if (cc == .h264 and sps_hdr == null) sps_hdr = SpsScan.find(pkt.data);
                                 if (dec) |*dc| {
                                     if (dc.decode(pkt.data, pkt.pts_us) catch null) |df| {
                                         dec_ok = df.width >= 1920 and df.height >= 1080;
@@ -301,6 +321,9 @@ pub fn runSelfProbe() void {
                         }
                     };
                     const dec_hr: u32 = if (dec) |d| @bitCast(d.last_hr) else 0;
+                    if (cc == .h264) if (sps_hdr) |sh| {
+                        std.debug.print("hw-probe: MF h264 SPS profile_idc={d} (0x{x:0>2}) constraints=0x{x:0>2} level={d}\n", .{ sh[0], sh[0], sh[1], sh[2] });
+                    };
                     std.debug.print("hw-probe: MF {s} -> hw_enc={any} enc_bytes={d} enc_hr=0x{x:0>8} dec_ok={any} dec_err={s} dec_hr=0x{x:0>8}\n", .{
                         cc.name(), enc.hw, enc_bytes, @as(u32, @bitCast(enc.last_hr)), dec_ok, dec_err_name, dec_hr,
                     });

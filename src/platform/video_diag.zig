@@ -39,6 +39,8 @@ var tx_rtp: AtomicU32 = .init(0);
 var tx_pli: AtomicU32 = .init(0);
 var tx_nack: AtomicU32 = .init(0);
 var tx_remb: AtomicU32 = .init(0);
+var tx_skip_mask: AtomicU8 = .init(0);
+var dave_mls_err: AtomicU32 = .init(0);
 var tx_hw: AtomicBool = .init(false);
 var tx_w: AtomicU16 = .init(0);
 var tx_h: AtomicU16 = .init(0);
@@ -135,6 +137,16 @@ pub fn txRemb() void {
     _ = tx_remb.fetchAdd(1, .monotonic);
 }
 
+/// Bitmask não-secreto dos motivos de bloqueio no TX de vídeo:
+/// 1 = !connected/!secret/ssrc=0, 2 = waiting DAVE, 4 = dave.encryptMedia == 0
+pub fn txSkip(bit: u8) void {
+    _ = tx_skip_mask.fetchOr(bit, .monotonic);
+}
+
+pub fn daveFail() void {
+    _ = dave_mls_err.fetchAdd(1, .monotonic);
+}
+
 pub fn maybeFlush(now_ms: i64) void {
     if (comptime builtin.is_test or builtin.cpu.arch == .wasm32) return;
     const prev = last_flush_ms.load(.monotonic);
@@ -165,8 +177,10 @@ pub fn maybeFlush(now_ms: i64) void {
     const tpli = tx_pli.swap(0, .monotonic);
     const tnack = tx_nack.swap(0, .monotonic);
     const tremb = tx_remb.swap(0, .monotonic);
+    const tskip = tx_skip_mask.swap(0, .monotonic);
+    const merr = dave_mls_err.swap(0, .monotonic);
 
-    const active = udp + asm_ok + asm_drop + dec_in + dec_out + tcap + tenc + tsent + trtp + ui_w + ui_c;
+    const active = udp + asm_ok + asm_drop + dec_in + dec_out + tcap + tenc + tsent + trtp + ui_w + ui_c + merr;
     if (active == 0) return;
 
     var ch_buf: [512]u8 = undefined;
@@ -187,7 +201,7 @@ pub fn maybeFlush(now_ms: i64) void {
     var line_buf: [512]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buf,
-        "t={d} rx[op12={d} udp={d} pt={d} asm={d}/{d} dave={d}/{d} uid0={d} dec={d}/{d}(hw={d} hr=0x{x:0>8} {d}x{d}) ui={d}/{d}] tx[cap={d} enc={d}(hw={d} {d}x{d}) drop={d} sent={d} rtp={d} rtcp={d}/{d}/{d}]\n",
+        "t={d} rx[op12={d} udp={d} pt={d} asm={d}/{d} dave={d}/{d} uid0={d} dec={d}/{d}(hw={d} hr=0x{x:0>8} {d}x{d}) ui={d}/{d}] tx[cap={d} enc={d}(hw={d} {d}x{d}) drop={d} sent={d} rtp={d} rtcp={d}/{d}/{d} skip={d} merr={d}]\n",
         .{
             now_ms,
             rx_op12_ssrc.load(.monotonic),
@@ -217,6 +231,8 @@ pub fn maybeFlush(now_ms: i64) void {
             tpli,
             tnack,
             tremb,
+            tskip,
+            merr,
         },
     ) catch return;
     _ = c.write(fd, line.ptr, @intCast(line.len));

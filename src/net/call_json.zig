@@ -36,6 +36,13 @@ pub fn serverId(guild: Id, channel: Id) Id {
     return if (guild != 0) guild else channel;
 }
 
+/// Grupo DAVE MLS: em transmissões Go Live o `group_id` é `rtc_server_id - 1`
+/// mesmo quando `rtc_channel_id` difere do canal de voz; em chamadas é `channel_id`.
+pub fn daveGroupId(is_stream: bool, server_id: Id, channel: Id) Id {
+    if (is_stream and server_id > 0) return server_id -% 1;
+    return channel;
+}
+
 /// Op 0 do gateway de voz. O texto leva o token: quem chama apaga depois.
 pub fn writeIdentify(out: *std.ArrayList(u8), a: std.mem.Allocator, guild: Id, channel: Id, user: Id, session: []const u8, token: []const u8, max_dave: u16) !void {
     return writeIdentifyVideo(out, a, guild, channel, user, session, token, max_dave, false);
@@ -63,7 +70,7 @@ pub fn writeSelectProtocol(out: *std.ArrayList(u8), a: std.mem.Allocator, ip: []
     try j.writeString(out, a, ip);
     try out.print(a, ",\"port\":{d},\"mode\":\"aead_xchacha20_poly1305_rtpsize\"}}", .{port});
     if (include_video) {
-        try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":101,\"rtx_payload_type\":102,\"encode\":true,\"decode\":true}]}}");
+        try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":101,\"rtx_payload_type\":102,\"encode\":true,\"decode\":true}],\"experiments\":[\"fixed_keyframe_interval\"]}}");
     } else {
         try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120}]}}");
     }
@@ -111,10 +118,18 @@ pub fn writeVideoOp12(out: *std.ArrayList(u8), a: std.mem.Allocator, audio_ssrc:
 }
 
 pub fn writeVideoOp12Kind(out: *std.ArrayList(u8), a: std.mem.Allocator, audio_ssrc: u32, video_ssrc: u32, rtx_ssrc: u32, active: bool, width: u16, height: u16, fps: u8, max_bitrate: u32, stream_type: []const u8) !void {
+    if (!active or video_ssrc == 0) {
+        try out.print(
+            a,
+            "{{\"op\":12,\"d\":{{\"audio_ssrc\":{d},\"video_ssrc\":0,\"rtx_ssrc\":0,\"streams\":[]}}}}",
+            .{audio_ssrc},
+        );
+        return;
+    }
     try out.print(
         a,
-        "{{\"op\":12,\"d\":{{\"audio_ssrc\":{d},\"video_ssrc\":{d},\"rtx_ssrc\":{d},\"streams\":[{{\"type\":\"{s}\",\"rid\":\"100\",\"ssrc\":{d},\"rtx_ssrc\":{d},\"active\":{s},\"quality\":100,\"max_bitrate\":{d},\"max_framerate\":{d},\"max_resolution\":{{\"type\":\"fixed\",\"width\":{d},\"height\":{d}}}}}]}}}}",
-        .{ audio_ssrc, video_ssrc, rtx_ssrc, stream_type, video_ssrc, rtx_ssrc, flag(active), max_bitrate, fps, width, height },
+        "{{\"op\":12,\"d\":{{\"audio_ssrc\":{d},\"video_ssrc\":{d},\"rtx_ssrc\":{d},\"streams\":[{{\"type\":\"{s}\",\"rid\":\"100\",\"ssrc\":{d},\"rtx_ssrc\":{d},\"active\":true,\"quality\":100,\"max_bitrate\":{d},\"max_framerate\":{d},\"max_resolution\":{{\"type\":\"fixed\",\"width\":{d},\"height\":{d}}}}}]}}}}",
+        .{ audio_ssrc, video_ssrc, rtx_ssrc, stream_type, video_ssrc, rtx_ssrc, max_bitrate, fps, width, height },
     );
 }
 
@@ -202,9 +217,14 @@ test "op 4 com self_video e op 18/19/20/12 de vídeo 4K" {
     try t.expect(std.mem.indexOf(u8, out.items, "\"width\":3840,\"height\":2160") != null);
 
     out.clearRetainingCapacity();
+    try writeVideoOp12(&out, t.allocator, 100, 0, 0, false, 1920, 1080, 30, 4_000_000);
+    try t.expectEqualStrings("{\"op\":12,\"d\":{\"audio_ssrc\":100,\"video_ssrc\":0,\"rtx_ssrc\":0,\"streams\":[]}}", out.items);
+
+    out.clearRetainingCapacity();
     try writeSelectProtocol(&out, t.allocator, "1.2.3.4", 50000, true);
     try t.expect(std.mem.indexOf(u8, out.items, "\"name\":\"H264\"") != null);
     try t.expect(std.mem.indexOf(u8, out.items, "\"payload_type\":101,\"rtx_payload_type\":102") != null);
+    try t.expect(std.mem.indexOf(u8, out.items, "\"fixed_keyframe_interval\"") != null);
 
     out.clearRetainingCapacity();
     try writeMediaSinkWants(&out, t.allocator, 9988);
@@ -293,4 +313,10 @@ test "CALL_CREATE / CALL_UPDATE / CALL_DELETE" {
     const p4 = try std.json.parseFromSlice(std.json.Value, a, "{\"ringing\":[\"1000\"]}", .{});
     defer p4.deinit();
     try t.expect(parse(p4.value, 1000, false) == null);
+}
+
+test "daveGroupId usa rtc_server_id - 1 para Go Live e channel para chamada" {
+    try t.expectEqual(@as(Id, 2000), daveGroupId(false, 1000, 2000));
+    try t.expectEqual(@as(Id, 8999), daveGroupId(true, 9000, 7777));
+    try t.expectEqual(@as(Id, 2000), daveGroupId(true, 0, 2000));
 }

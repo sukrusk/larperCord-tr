@@ -1,5 +1,13 @@
 # Sürüm Notları
 
+## 0.6.9
+
+**Kamera, ekran paylaşımı ve resmi Discord uyumu**
+- DAVE E2EE başlangıç kilidi düzeltildi (`OP 4` SessionDescription paketinden önce gelen `OP 25` dış gönderici paketi artık bekletilip işleniyor) ve Go Live MLS `group_id` değeri (`rtc_channel_id` farklı olsa bile `rtc_server_id - 1`) ile `STREAM_CREATE` sırası düzeltildi.
+- Resmi Discord masaüstü ve web istemcilerinin giden kamera ve ekran yayınlarını çözebilmesi için `0xBEDE` RTP başlık uzantıları (`abs-send-time`, `playout-delay`, `video-content-type`, `rid`), RFC 4588 RTX yeniden iletimi (`video_rtx_ssrc` + `repaired-rid`) ve 5 saniyelik RTCP Sender Report paketleri eklendi.
+- Windows H.264 Media Foundation kodlayıcıları artık WebRTC uyumlu Constrained Baseline profili (`profile-level-id=42e01f`) istiyor; `OP 12` `"video"` sinyalizasyonu (durunca `"streams":[]`) ve Go Live `SOUNDSHARE` (`speaking=2`) güncellendi.
+- DAVE dönem geçişleri (`OP 24`, ön-DAVE kuyruğu temizleme + keyframe isteği) iyileştirildi ve `video_diag.log` çıktısına `skip` ile MLS `merr` sayaçları eklendi.
+
 ## 0.6.8
 
 **Tek .exe ve güncelleme**
