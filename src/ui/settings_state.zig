@@ -287,6 +287,9 @@ pub const Settings = struct {
 
     /// Volume dos vídeos em % (0..100; 0 = mudo).
     video_volume: u8 = 100,
+    /// Volume das transmissões assistidas em % (0..200) e mudo rápido.
+    stream_volume: u8 = 100,
+    stream_muted: bool = false,
 
     // Erros no código (ui/settings_lsp.zig): uma linguagem de core/lsp.zig `known`
     // em cada par. Tudo desligado por padrão; ligar é sempre a pessoa quem faz.
@@ -1024,4 +1027,30 @@ test "o renderizador sai do settings.kdl antes de tudo, e nome estranho vira aut
     defer out.deinit(gpa);
     try write(&s, "zen", &out, gpa);
     try std.testing.expectEqualStrings("opengl", peekRenderer(gpa, out.items, &buf));
+}
+
+test "volume e mudo da transmissão vão e voltam pelo KDL e pela paleta" {
+    const kdl = @import("../theme/kdl.zig");
+    const fresh: Settings = .{};
+    try std.testing.expectEqual(@as(u8, 100), fresh.stream_volume);
+    try std.testing.expect(!fresh.stream_muted);
+    var s: Settings = .{};
+    s.stream_volume = 165;
+    s.stream_muted = true;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try write(&s, "classico", &out, std.testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nodes = try kdl.parse(arena.allocator(), out.items, null);
+    var back: Settings = .{};
+    apply(&back, &nodes[0]);
+    try std.testing.expectEqual(@as(u8, 165), back.stream_volume);
+    try std.testing.expect(back.stream_muted);
+    const vol_idx = fieldIndex("stream_volume");
+    const mute_idx = fieldIndex("stream_muted");
+    try std.testing.expect(setByte(&back, vol_idx, 80));
+    try std.testing.expectEqual(@as(?u8, 80), getByte(&back, vol_idx));
+    try std.testing.expect(setByte(&back, mute_idx, 0));
+    try std.testing.expectEqual(@as(?u8, 0), getByte(&back, mute_idx));
 }

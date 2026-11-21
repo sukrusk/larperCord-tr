@@ -207,6 +207,18 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
     @import("chamada.zig").overlay(ctx);
     @import("stream_view.zig").overlay(ctx);
     shortcuts(ctx);
+    if (ctx.st.theme_fade_ms > ctx.now_ms) {
+        const rem = @as(f32, @floatFromInt(ctx.st.theme_fade_ms - ctx.now_ms)) / 190.0;
+        const cu = ctx.st.theme_fade_col;
+        const fade: d.Rgba = .{
+            .r = @as(f32, @floatFromInt(cu & 0xff)) / 255.0,
+            .g = @as(f32, @floatFromInt((cu >> 8) & 0xff)) / 255.0,
+            .b = @as(f32, @floatFromInt((cu >> 16) & 0xff)) / 255.0,
+            .a = rem * rem,
+        };
+        d.rect(ctx.fg, ctx.win, fade, 0);
+        anim.every(16);
+    }
     // A conversão do IME num campo que não é a caixa do chat: por cima de tudo, no cursor dele.
     @import("ime.zig").floating(ctx);
     // O que abriu depois dos popups (Configurações, paleta, atalhos) também é desta janela.

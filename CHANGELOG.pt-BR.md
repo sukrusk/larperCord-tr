@@ -1,5 +1,21 @@
 # O que mudou em cada versão
 
+## 0.8.3
+
+**Controles e Áudio de Stream**
+- Adicionado popover ao vivo de **Configurações da transmissão** no Go Live (`720p`/`1080p`/`1440p`/`4K`, `30`/`60` FPS, bitrate, predefinição de desempenho, áudio do sistema, cursor, prévia local e troca de tela/janela) aplicando mudanças por `updateNativeCapture` e `OP 12` sem derrubar a live.
+- Adicionado controle independente de volume **Áudio da stream** (`0%`–`200%`) e botão de mudo no HUD da transmissão, no mixer (`popup.zig`) e no menu do usuário, salvos no `settings.kdl` (`stream_volume`, `stream_muted`) e sincronizados no `watch_voice`.
+- Conexões `stream_voice` e `watch_voice` não abrem mais microfones duplicados nem sobrescrevem o status de voz.
+
+**Stream e Múltiplas Câmeras**
+- Roteamento de codec RTP por SSRC (`101=H.264`, `103=VP8`, `105=VP9`, `107=HEVC`, `109=AV1` e RTX) em vez de estado global único, com expansão dos slots de vídeo (`16` `VideoRxSlot`/`DecSlot`, `32` quadros no `dec_ring`, `12` `peer_cams`, `17` streams de mídia) para decodificar tela e câmeras juntas sem conflito.
+- Grade lado a lado (`call_grid.zig`, `stream_view.zig`) e faixa flutuante de câmeras no canto inferior direito (`drawCamOverlayStrip`, com alternância `stream_show_cams` e isolada da captura remota AnyDesk) ao assistir live na conversa ou em tela cheia.
+- Rótulo de nome em tiles com câmera ativa movido para uma pílula discreta no canto inferior esquerdo (`call_grid.zig`).
+
+**Animações Suaves e Temas**
+- Resposta de hover em 60 FPS (`MousePace.interval_ms = 16`) e animações suaves de zoom/fade ao abrir e fechar configurações (`settings.zig`), no indicador das DMs (`comp_rail.zig`) e no hover de membros em voz (`comp_channels.zig`).
+- Transição crossfade de `190 ms` ao trocar de tema (`app.zig`, `root.zig`) e traduções em turco concluídas (`i18n/tr.kdl`).
+
 ## 0.8.2
 
 **Assistir Lives do Discord**

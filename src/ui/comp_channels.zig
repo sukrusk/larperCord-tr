@@ -384,7 +384,8 @@ fn row(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, variant: Variant, cs: any
             } else if (voiceFlagsTip(vf)) |vt| {
                 d.tip(ctx, vr, vt, vh.hovered);
             }
-            if (vh.hovered and variant != .tree) d.rect(dl, vr, ctx.col(.hover), ctx.th.radius);
+            const hov_k = anim.to(anim.id("vm-hov", uid), if (vh.hovered) 1 else 0, 18);
+            if (hov_k > 0.01 and variant != .tree) d.rect(dl, vr, ctx.col(.hover).alpha(hov_k), ctx.th.radius);
             if (vh.clicked and on_live) {
                 ctx.act(.{ .watch_member_stream = .{ .channel = ch.id, .owner = uid } });
             } else if (vh.clicked) {
@@ -407,7 +408,7 @@ fn row(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, variant: Variant, cs: any
                     const reserve_live: f32 = if (is_live) live_pill_w + 6 else 0;
                     if (is_live) {
                         const watching = ctx.st.watch_owner == uid;
-                        const pill_col = (if (watching) ctx.col(.online) else ctx.col(.danger)).mix(d.Rgba.white, if (vh.hovered and on_live) 0.16 else 0);
+                        const pill_col = (if (watching) ctx.col(.online) else ctx.col(.danger)).mix(d.Rgba.white, hov_k * (if (on_live) @as(f32, 0.16) else 0));
                         d.rect(dl, live_r, pill_col, 4);
                         d.text(dl, fam.get(.bold), 9.5, live_r.x + 5, d.centerY(live_r, 9.5), d.Rgba.white, live_lbl);
                         qa.mark(live_r, "voice-live:{d}", .{uid});

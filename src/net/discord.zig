@@ -150,6 +150,8 @@ pub const Gateway = struct {
     voice_token_len: usize = 0,
     /// Volume individual por pessoa (0..2), mantido entre calls.
     voice_volumes: std.AutoHashMapUnmanaged(Id, f32) = .empty,
+    /// Volume da transmissão assistida (0..2), aplicado ao watch_voice.
+    stream_volume: f32 = 1.0,
     /// "Tirar ruído" e "Igualar volume" por pessoa (mixer da call), para cada call nova.
     voice_dsp: std.AutoHashMapUnmanaged(Id, voice_mod.Dsp) = .empty,
     /// O último op 4 escrito, até o VOICE_STATE_UPDATE da conta confirmar que chegou.
@@ -3207,7 +3209,7 @@ pub const Gateway = struct {
     /// Comando que é escrito no WebSocket (não passa pelo REST).
     fn usesGateway(cmd: ev.Command) bool {
         return switch (cmd) {
-            .subscribe_guild, .channel_info, .set_status, .set_activity, .set_game, .join_voice, .voice_flags, .start_video, .stop_video, .start_stream, .stop_stream, .watch_stream => true,
+            .subscribe_guild, .channel_info, .set_status, .set_activity, .set_game, .join_voice, .voice_flags, .start_video, .stop_video, .start_stream, .update_stream_cfg, .stop_stream, .watch_stream => true,
             // Os eventos da interação vão para a sessão do READY (session_id).
             .interaction => |ic| ic == .send,
             else => false,
@@ -4160,9 +4162,12 @@ pub const Gateway = struct {
             g.watch_token[0..g.watch_token_len],
             g.voice_session[0..g.voice_session_len],
             true,
-            false,
+            g.voice_deaf,
         );
         wv.setWatchStreamMode(g.watch_key[0..g.watch_key_len]);
+        wv.setStreamVolume(g.stream_volume);
+        var vit = g.voice_volumes.iterator();
+        while (vit.next()) |kv| wv.setVolume(kv.key_ptr.*, kv.value_ptr.*);
         wv.start() catch {
             wv.deinit();
             alloc.destroy(wv);
@@ -5091,11 +5096,19 @@ pub const Gateway = struct {
                 g.voice_mute = f.mute;
                 g.voice_deaf = f.deaf;
                 if (g.voice) |vc| vc.setFlags(f.mute, f.deaf);
+                if (g.watch_voice) |wv| wv.setFlags(true, f.deaf);
                 if (g.voice_channel != 0) g.sendVoiceState(g.voice_channel);
             },
             .voice_volume => |v| {
                 g.voice_volumes.put(alloc, v.user, std.math.clamp(v.volume, 0, 2)) catch {};
                 if (g.voice) |vc| vc.setVolume(v.user, v.volume);
+                if (g.watch_voice) |wv| wv.setVolume(v.user, v.volume);
+            },
+            .stream_volume => |vol| {
+                const clamped = std.math.clamp(vol, 0, 2);
+                g.stream_volume = clamped;
+                if (g.watch_voice) |wv| wv.setStreamVolume(clamped);
+                if (g.voice) |vc| vc.setStreamVolume(clamped);
             },
             .voice_dsp => |v| {
                 const dsp: voice_mod.Dsp = .{ .denoise = v.denoise, .level = v.level };
@@ -5140,6 +5153,34 @@ pub const Gateway = struct {
                     else
                         std.fmt.bufPrint(&g.stream_key, "call:{d}:{d}", .{ g.voice_channel, g.me }) catch "";
                     g.stream_key_len = @intCast(sk.len);
+                    const k = ev.StreamInfo.fromKey(sk);
+                    g.emit(.{ .stream_update = .{
+                        .channel = g.voice_channel,
+                        .guild = g.voice_guild,
+                        .owner = g.me,
+                        .active = true,
+                        .source = cfg.kind,
+                        .width = @intCast(dims[0]),
+                        .height = @intCast(dims[1]),
+                        .fps = cfg.fps,
+                        .codec = eff_codec,
+                        .has_audio = cfg.share_audio,
+                        .remote_perm = cfg.remote_perm,
+                        .stream_key = k.buf,
+                        .stream_key_len = k.len,
+                    } });
+                }
+            },
+            .update_stream_cfg => |cfg| {
+                if (g.voice_channel != 0) {
+                    const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu or cfg.codec == .auto) .h264 else cfg.codec;
+                    g.stream_cfg = cfg;
+                    g.stream_cfg.codec = eff_codec;
+                    const dims = cfg.resolution.dims();
+                    if (g.stream_voice) |sv| {
+                        sv.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), cfg.fps, cfg.bitrate_kbps);
+                    }
+                    const sk = g.stream_key[0..g.stream_key_len];
                     const k = ev.StreamInfo.fromKey(sk);
                     g.emit(.{ .stream_update = .{
                         .channel = g.voice_channel,

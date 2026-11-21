@@ -1,5 +1,21 @@
 # What changed in each version
 
+## 0.8.3
+
+**Live Stream Controls & Audio**
+- Added a live **Stream Settings** popover in the Go Live view (`720p`/`1080p`/`1440p`/`4K`, `30`/`60` FPS, bitrate, encoder speed/quality preset, system audio, cursor capture, self preview and live screen/window source switching) that applies changes smoothly via `updateNativeCapture` and `OP 12` without dropping the Go Live session unless transport changes.
+- Added an independent **Stream Audio** volume slider (`0%`–`200%`) and Mute toggle in the stream viewer HUD, call volume mixer (`popup.zig`) and user context menu, persisted in `settings.kdl` (`stream_volume`, `stream_muted`) and synced to `watch_voice`.
+- Stopped `stream_voice` and `watch_voice` sessions from opening duplicate microphone handles or overwriting voice capture status.
+
+**Stream + Multi-Cam Decoding**
+- Switched RTP video decoding to per-SSRC payload-type codec routing (`101=H.264`, `103=VP8`, `105=VP9`, `107=HEVC`, `109=AV1` and RTX) instead of a shared global `rx_video_codec`, and expanded video slots (`16` `VideoRxSlot`/`DecSlot`, `32` `dec_ring` frames, `12` `peer_cams`, `17` media sink entries) so Discord screen streams and peer cameras decode cleanly at the same time.
+- Added a side-by-side split stage (`call_grid.zig`, `stream_view.zig`) and a floating bottom-right camera PiP strip (`drawCamOverlayStrip`, respecting `stream_show_cams` and excluded from AnyDesk remote capture) when watching a stream in DM/text modal mode or fullscreen.
+- Moved active camera tile labels to a compact bottom-left dark pill (`call_grid.zig`) so usernames do not obscure video.
+
+**Smooth UI & Theme Animations**
+- Restored 60 FPS pointer hover smoothness (`MousePace.interval_ms = 16`, unified `anim.active` busy frame pacing) and smoothed settings open/close zoom+fade (`settings.zig`), DM rail pill animations (`comp_rail.zig`), and voice member row hover transitions (`comp_channels.zig`).
+- Added a `190 ms` crossfade overlay when switching themes (`app.zig`, `root.zig`) and completed Turkish translations (`i18n/tr.kdl`).
+
 ## 0.8.2
 
 **Discord Live Stream Viewing**

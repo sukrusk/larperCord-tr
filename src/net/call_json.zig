@@ -337,3 +337,19 @@ test "daveGroupId usa rtc_server_id - 1 para Go Live e channel para chamada" {
     try t.expectEqual(@as(Id, 8999), daveGroupId(true, 9000, 7777));
     try t.expectEqual(@as(Id, 2000), daveGroupId(true, 0, 2000));
 }
+
+test "writeVideoOp12Kind envia type screen ou video e atualiza dimensões" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(t.allocator);
+    try writeVideoOp12Kind(&out, t.allocator, 100, 200, 201, true, 1920, 1080, 60, 9_000_000, "screen");
+    try t.expect(std.mem.indexOf(u8, out.items, "\"type\":\"screen\"") != null);
+    try t.expect(std.mem.indexOf(u8, out.items, "\"width\":1920,\"height\":1080") != null);
+    try t.expect(std.mem.indexOf(u8, out.items, "\"max_bitrate\":9000000,\"max_framerate\":60") != null);
+    out.clearRetainingCapacity();
+    try writeVideoOp12(&out, t.allocator, 100, 300, 301, true, 1280, 720, 30, 2_200_000);
+    try t.expect(std.mem.indexOf(u8, out.items, "\"type\":\"video\"") != null);
+    try t.expect(std.mem.indexOf(u8, out.items, "\"width\":1280,\"height\":720") != null);
+    out.clearRetainingCapacity();
+    try writeVideoOp12Kind(&out, t.allocator, 100, 0, 0, false, 1280, 720, 30, 3_500_000, "video");
+    try t.expectEqualStrings("{\"op\":12,\"d\":{\"audio_ssrc\":100,\"video_ssrc\":0,\"rtx_ssrc\":0,\"streams\":[]}}", out.items);
+}

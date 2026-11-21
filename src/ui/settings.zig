@@ -535,33 +535,34 @@ pub fn draw(ctx: *d.Ctx, previews: []const Preview) void {
     const s = &ctx.st.settings;
     const k = anim.to(anim.id("settings", 0), if (s.open) 1 else 0, 18);
     if (k < 0.01) return;
-    if (!s.open) {
-        // Desaparecendo: só um véu, sem interação.
-        d.rect(ctx.fg, ctx.win, ctx.col(.surface).alpha(k), 0);
-        return;
-    }
 
     const win = ctx.win;
+    const interactive = s.open;
+    const z = 1 - (1 - k) * 0.04;
+    const origin = d.v(win.x + win.w * 0.5, win.y + win.h * 0.5);
     c.ImGui_SetNextWindowPos(d.v(win.x, win.y), 0);
     c.ImGui_SetNextWindowSize(d.v(win.w, win.h), 0);
-    _ = c.ImGui_Begin("##settings", null, c.ImGuiWindowFlags_NoDecoration | c.ImGuiWindowFlags_NoBackground |
-        c.ImGuiWindowFlags_NoSavedSettings | c.ImGuiWindowFlags_NoMove | c.ImGuiWindowFlags_NoScrollWithMouse);
+    var flags: c.ImGuiWindowFlags = c.ImGuiWindowFlags_NoDecoration | c.ImGuiWindowFlags_NoBackground |
+        c.ImGuiWindowFlags_NoSavedSettings | c.ImGuiWindowFlags_NoMove | c.ImGuiWindowFlags_NoScrollWithMouse;
+    if (!interactive) flags |= c.ImGuiWindowFlags_NoInputs;
+    _ = c.ImGui_Begin("##settings", null, flags);
     defer c.ImGui_End();
     const dl = c.ImGui_GetWindowDrawList();
     const saved_dl = ctx.dl;
     ctx.dl = dl;
     defer ctx.dl = saved_dl;
 
-    // Entra com um leve zoom, como no Discord.
-    const z = 1 - (1 - k) * 0.04;
     const bg = ctx.col(.surface);
     const opaque_bg = d.Rgba{ .r = bg.r, .g = bg.g, .b = bg.b, .a = @max(bg.a, 0.97) };
     d.rect(dl, win, opaque_bg.alpha(k), 0);
 
+    const vtx_panel = dl.*.VtxBuffer.Size;
+    defer d.transformVerts(dl, vtx_panel, origin, z, 0, k);
+
     const side_w = @max(220, win.w * 0.3);
     const side: d.Rect = .{ .x = win.x, .y = win.y, .w = side_w, .h = win.h };
     const sb = ctx.col(.sidebar);
-    d.rect(dl, side, (d.Rgba{ .r = sb.r, .g = sb.g, .b = sb.b, .a = @max(sb.a, 0.97) }).alpha(k), 0);
+    d.rect(dl, side, .{ .r = sb.r, .g = sb.g, .b = sb.b, .a = @max(sb.a, 0.97) }, 0);
 
     // Menu. Numa janela baixa os itens chegam mais perto (e, se precisar, o topo
     // sobe) para o "Sair" do fim continuar à vista.
@@ -608,14 +609,16 @@ pub fn draw(ctx: *d.Ctx, previews: []const Preview) void {
     const content: d.Rect = .{ .x = side.right(), .y = win.y, .w = win.w - side_w, .h = win.h };
     const cw = @min(740, content.w - 120);
     c.ImGui_SetCursorScreenPos(d.v(content.x, content.y));
-    _ = c.ImGui_BeginChild("##settings-page", d.v(content.w, content.h), 0, c.ImGuiWindowFlags_NoBackground);
+    _ = c.ImGui_BeginChild("##settings-page", d.v(content.w, content.h), 0, c.ImGuiWindowFlags_NoBackground | (if (!interactive) @as(c.ImGuiWindowFlags, c.ImGuiWindowFlags_NoInputs) else 0));
     const cdl = c.ImGui_GetWindowDrawList();
+    const vtx_child = cdl.*.VtxBuffer.Size;
     const o = c.ImGui_GetCursorScreenPos();
     ctx.dl = cdl;
-    var p: Page = .{ .ctx = ctx, .dl = cdl, .x = content.x + 40, .y = o.y + 60 + (1 - z) * 200, .w = cw };
+    var p: Page = .{ .ctx = ctx, .dl = cdl, .x = content.x + 40, .y = o.y + 60, .w = cw };
     page(&p, previews);
     c.ImGui_SetCursorScreenPos(d.v(content.x, p.y + 60));
     c.ImGui_Dummy(d.v(1, 1));
+    d.transformVerts(cdl, vtx_child, origin, z, 0, k);
     c.ImGui_EndChild();
     ctx.dl = dl;
 
@@ -633,7 +636,7 @@ pub fn draw(ctx: *d.Ctx, previews: []const Preview) void {
     const ew = d.width(fam.get(.bold), 12, "ESC");
     d.text(dl, fam.get(.bold), 12, cx - ew / 2, cr.bottom() + 8, ctx.col(.muted), "ESC");
     // Trocando um atalho, o Esc só cancela a troca (ver Page.keyRowEditable).
-    if (hb.clicked or (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and !dropdown.ownsEsc() and !teclas.busy())) ctx.act(.close_settings);
+    if (interactive and (hb.clicked or (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and !dropdown.ownsEsc() and !teclas.busy()))) ctx.act(.close_settings);
 }
 
 var color_slot: i32 = -1;

@@ -1,5 +1,21 @@
 # Sürüm Notları
 
+## 0.8.3
+
+**Canlı Yayın ve Ses Kontrolü**
+- Go Live ekranına yayın kesilmeden anında uygulanabilen canlı **Yayın Ayarları** menüsü eklendi (`720p`/`1080p`/`1440p`/`4K`, `30`/`60` FPS, bitrate, performans ön ayarı, sistem sesi, imleç, öz izleme ve pencere/ekran kaynağı değiştirme — `updateNativeCapture` + `OP 12`).
+- İzleyici HUD'una, ses mikserine (`popup.zig`) ve kullanıcı sağ tık menüsüne kalıcı bağımsız **Yayın Sesi** seviye çubuğu (`%0`–`%200`) ve susturma anahtarı eklendi (`settings.kdl`: `stream_volume`, `stream_muted`, `watch_voice` senkronizasyonu).
+- `stream_voice` ve `watch_voice` bağlantılarının çift mikrofon açması ve ses durumu bildirimlerini bozması engellendi.
+
+**Yayın ve Çoklu Kamera**
+- Paylaşılan tek global codec yerine SSRC başına RTP payload-type codec yönlendirmesi (`101=H.264`, `103=VP8`, `105=VP9`, `107=HEVC`, `109=AV1` + RTX) ve genişletilmiş video yuvaları (`16` `VideoRxSlot`/`DecSlot`, `32` halka yuvası, `12` `peer_cams`, `17` medya sink) ile ekran yayını ve kameralar aynı anda hatasız çözülür.
+- Hem DM/metin görünümünde hem tam ekranda yayın izlerken yan yana bölünmüş sahne (`call_grid.zig`, `stream_view.zig`) ve sağ altta kayan kamera şeridi (`drawCamOverlayStrip`, `stream_show_cams` anahtarı ve AnyDesk uzaktan kontrolünden hariç) eklendi.
+- Aktif kamera karolarındaki kullanıcı adı yazısı yüzü kapatmayacak şekilde alt-sol koyu etikete taşındı (`call_grid.zig`).
+
+**Akıcı Arayüz ve Tema Geçişi**
+- Fare hover tepkisi 60 FPS'e çıkarıldı (`MousePace.interval_ms = 16`); ayarlar açılış/kapanış yakınlaştırma animasyonu (`settings.zig`), DM simge göstergesi (`comp_rail.zig`) ve sesli kanal üye hover geçişleri (`comp_channels.zig`) yumuşatıldı.
+- Tema değiştirirken `190 ms` yumuşak geçiş (crossfade) eklendi (`app.zig`, `root.zig`) ve tüm yeni dizgelerin Türkçe çevirisi (`i18n/tr.kdl`) tamamlandı.
+
 ## 0.8.2
 
 **Discord Yayını İzleme**

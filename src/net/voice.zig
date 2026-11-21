@@ -253,6 +253,10 @@ pub const Voice = struct {
     dsp: std.AutoHashMapUnmanaged(Id, Dsp) = .empty,
     /// Sobe a cada mudança de volume ou de `dsp` (a thread de voz reaplica).
     volumes_gen: std.atomic.Value(u32) = .init(0),
+    /// Volume específico do áudio de transmissão assistida (Go Live, 0..2).
+    stream_gain: std.atomic.Value(f32) = .init(1.0),
+    /// Sobe quando resolução/FPS/bitrate do vídeo mudam ao vivo (reenvia OP 12).
+    video_cfg_gen: std.atomic.Value(u32) = .init(0),
     /// Sem rede: só o microfone e a detecção de voz (a demonstração).
     local: bool = false,
 
@@ -339,14 +343,17 @@ pub const Voice = struct {
         v.video_fps.store(@max(fps, 1), .release);
         v.video_bitrate.store(@max(bitrate_kbps, 500), .release);
         v.video_target_kbps.store(@max(bitrate_kbps, 500), .release);
-        v.video_enabled.store(enabled, .release);
+        const was_enabled = v.video_enabled.swap(enabled, .acq_rel);
+        _ = v.video_cfg_gen.fetchAdd(1, .release);
         if (enabled) {
-            c.SDL_LockMutex(v.video_mu);
-            v.tx_head = 0;
-            v.tx_tail = 0;
-            v.tx_count = 0;
-            v.tx_wait_key = true;
-            c.SDL_UnlockMutex(v.video_mu);
+            if (!was_enabled) {
+                c.SDL_LockMutex(v.video_mu);
+                v.tx_head = 0;
+                v.tx_tail = 0;
+                v.tx_count = 0;
+                v.tx_wait_key = true;
+                c.SDL_UnlockMutex(v.video_mu);
+            }
             v.video_keyframe_req.store(true, .release);
         } else {
             c.SDL_LockMutex(v.video_mu);
@@ -510,6 +517,11 @@ pub const Voice = struct {
         _ = v.volumes_gen.fetchAdd(1, .release);
     }
 
+    pub fn setStreamVolume(v: *Voice, gain: f32) void {
+        v.stream_gain.store(std.math.clamp(gain, 0, 2), .release);
+        _ = v.volumes_gen.fetchAdd(1, .release);
+    }
+
     pub fn setDsp(v: *Voice, user: Id, dsp: Dsp) void {
         c.SDL_LockMutex(v.volume_mutex);
         defer c.SDL_UnlockMutex(v.volume_mutex);
@@ -652,6 +664,7 @@ const Worker = struct {
     video_rtx_pt: u7 = 102,
     rx_video_codec: video_cfg.Codec = .h264,
     video_announced: bool = false,
+    video_cfg_gen: u32 = 0,
     video_rtp_seq: u16 = 0,
     video_rtx_seq: u16 = 0,
     last_video_rtp_ts: u32 = 0,
@@ -673,18 +686,18 @@ const Worker = struct {
     rtp_out_tail: u16 = 0,
     rtp_out_count: u16 = 0,
     last_remb_ms: i64 = 0,
-    video_rx: [8]VideoRxSlot = @splat(.{}),
+    video_rx: [16]VideoRxSlot = @splat(.{}),
     // Decodificação assíncrona (H.264/VP8/VP9/AV1) para nunca travar o UDP/áudio.
     dec_mu: ?*c.SDL_Mutex = null,
     dec_cond: ?*c.SDL_Condition = null,
     dec_thread: ?*c.SDL_Thread = null,
     dec_stop: std.atomic.Value(bool) = .init(false),
-    dec_ring: [16]DecJob = @splat(.{}),
+    dec_ring: [32]DecJob = @splat(.{}),
     dec_head: u8 = 0,
     dec_tail: u8 = 0,
     dec_count: u8 = 0,
     dec_drop_user: std.atomic.Value(Id) = .init(0),
-    dec_drop_queue: [8]Id = @splat(0),
+    dec_drop_queue: [16]Id = @splat(0),
     dec_drop_n: u8 = 0,
     video_buf_bumped: bool = false,
 
@@ -1365,7 +1378,7 @@ const Worker = struct {
     }
 
     fn sendMediaSinkWants(w: *Worker, extra_ssrc: u32) void {
-        var ssrcs: [9]u32 = undefined;
+        var ssrcs: [17]u32 = undefined;
         var n: usize = 0;
         if (extra_ssrc != 0) {
             ssrcs[n] = extra_ssrc;
@@ -1604,8 +1617,10 @@ const Worker = struct {
     fn syncVideoOp12(w: *Worker) void {
         if (!w.connected or w.video_ssrc == 0) return;
         const want = w.v.video_enabled.load(.acquire);
-        if (want == w.video_announced) return;
+        const gen = w.v.video_cfg_gen.load(.acquire);
+        if (want == w.video_announced and gen == w.video_cfg_gen) return;
         w.video_announced = want;
+        w.video_cfg_gen = gen;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(alloc);
         const bw_bps = @as(u32, w.v.video_bitrate.load(.acquire)) * 1000;
@@ -2170,8 +2185,9 @@ const Worker = struct {
         const ssrc = std.mem.readInt(u32, buf[8..12], .big);
         if (ssrc == w.ssrc or (w.video_ssrc != 0 and ssrc == w.video_ssrc)) return;
         const is_audio = pt == 120;
-        const is_rtx = !is_audio and ((pt == w.video_rtx_pt) or w.video_rtx_ssrcs.contains(ssrc) or ((pt == 97 or pt == 99 or pt == 102 or pt == 104 or pt == 106 or pt == 108 or pt == 110) and !w.video_ssrcs.contains(ssrc)));
-        const is_video = !is_audio and !is_rtx and (pt == w.video_pt or w.video_ssrcs.contains(ssrc));
+        const pt_codec = codecFromPayloadType(pt);
+        const is_rtx = !is_audio and ((pt == w.video_rtx_pt) or w.video_rtx_ssrcs.contains(ssrc) or (isVideoRtxPt(pt) and !w.video_ssrcs.contains(ssrc)));
+        const is_video = !is_audio and !is_rtx and (pt_codec != null or pt == w.video_pt or w.video_ssrcs.contains(ssrc));
         if (!is_audio and !is_video and !is_rtx) return;
         if (is_video or is_rtx) video_diag.rxUdpPkt(pt);
         // Nos modos "rtpsize" só o cabeçalho fixo, os CSRC e os 4 bytes do
@@ -2211,14 +2227,14 @@ const Worker = struct {
             const un = video_rtp.unwrapRtx(frame) orelse return;
             const ts = std.mem.readInt(u32, buf[4..8], .big);
             const marker = (buf[1] & 0x80) != 0;
-            w.onVideoRtp(orig_ssrc, un.orig_seq, ts, marker, un.orig_payload);
+            w.onVideoRtp(orig_ssrc, un.orig_seq, ts, marker, un.orig_payload, null);
             return;
         }
         if (is_video) {
             const seq = std.mem.readInt(u16, buf[2..4], .big);
             const ts = std.mem.readInt(u32, buf[4..8], .big);
             const marker = (buf[1] & 0x80) != 0;
-            w.onVideoRtp(ssrc, seq, ts, marker, frame);
+            w.onVideoRtp(ssrc, seq, ts, marker, frame, pt_codec);
             return;
         }
         const src = w.sourceFor(ssrc, 0) orelse return;
@@ -2256,21 +2272,25 @@ const Worker = struct {
     const spec: c.SDL_AudioSpec = voz_audio.spec;
 
     fn initAudio(w: *Worker) bool {
-        var err: c_int = 0;
-        w.encoder = c.opus_encoder_create(opus_rate, channels, c.OPUS_APPLICATION_VOIP, &err);
-        if (err == c.OPUS_OK) {
-            _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_BITRATE_REQUEST, @as(c_int, 64000));
-            _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_COMPLEXITY_REQUEST, @as(c_int, 5));
-            _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_INBAND_FEC_REQUEST, @as(c_int, 1));
-            _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_PACKET_LOSS_PERC_REQUEST, @as(c_int, 10));
-        } else w.encoder = null;
+        if (!(w.v.is_stream and !w.v.video_capable)) {
+            var err: c_int = 0;
+            w.encoder = c.opus_encoder_create(opus_rate, channels, c.OPUS_APPLICATION_VOIP, &err);
+            if (err == c.OPUS_OK) {
+                _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_BITRATE_REQUEST, @as(c_int, 64000));
+                _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_COMPLEXITY_REQUEST, @as(c_int, 5));
+                _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_INBAND_FEC_REQUEST, @as(c_int, 1));
+                _ = c.opus_encoder_ctl(w.encoder, c.OPUS_SET_PACKET_LOSS_PERC_REQUEST, @as(c_int, 10));
+            } else w.encoder = null;
+        }
         if (voz_audio.acquire()) {
             w.audio_on = true;
             const now = nowMs();
             w.out.open(now);
             w.updatePull();
-            w.mic.paused = w.v.micBlocked();
-            w.mic.open(now);
+            if (!w.v.is_stream) {
+                w.mic.paused = w.v.micBlocked();
+                w.mic.open(now);
+            }
         }
         w.applyAudioFlags();
         w.reportAudio();
@@ -2279,7 +2299,7 @@ const Worker = struct {
 
     /// Mudo desliga o microfone de verdade; ensurdecer pausa a saída.
     fn applyAudioFlags(w: *Worker) void {
-        w.mic.setPaused(w.v.micBlocked());
+        if (!w.v.is_stream) w.mic.setPaused(w.v.micBlocked());
         const deaf = w.v.outBlocked();
         if (w.out.dev != 0 and deaf != w.deaf_applied) {
             if (deaf) _ = c.SDL_PauseAudioDevice(w.out.dev) else _ = c.SDL_ResumeAudioDevice(w.out.dev);
@@ -2299,7 +2319,7 @@ const Worker = struct {
     /// microfone e passa cada pessoa para a saída nova. A conexão nem percebe.
     fn audioPoll(w: *Worker, now: i64) void {
         if (!w.audio_on) return;
-        w.mic.check(now);
+        if (!w.v.is_stream) w.mic.check(now);
         w.out.applyGain();
         if (w.out.check(now)) |dev| {
             for (w.sources[0..w.n_sources]) |*s| {
@@ -2317,6 +2337,7 @@ const Worker = struct {
     /// Avisa a interface quando o microfone ou a saída mudam de situação: ela
     /// mostra na barra de voz, em vez de ficar calada sem explicação.
     fn reportAudio(w: *Worker) void {
+        if (w.v.is_stream) return;
         const mic_ok = !w.mic.failed();
         const out_ok = w.out.dev != 0;
         if (mic_ok == w.mic_ok_sent and out_ok == w.out_ok_sent) return;
@@ -2524,7 +2545,7 @@ const Worker = struct {
         return std.fmt.parseInt(Id, sk[last + 1 ..], 10) catch 0;
     }
 
-    fn onVideoRtp(w: *Worker, ssrc: u32, seq: u16, ts: u32, marker: bool, payload: []const u8) void {
+    fn onVideoRtp(w: *Worker, ssrc: u32, seq: u16, ts: u32, marker: bool, payload: []const u8, pt_codec: ?video_cfg.Codec) void {
         var uid = w.video_ssrcs.get(ssrc) orelse 0;
         if (uid == 0 and w.v.is_stream) uid = w.streamOwner();
         var slot: ?*VideoRxSlot = null;
@@ -2541,6 +2562,23 @@ const Worker = struct {
                         .active = true,
                         .ssrc = ssrc,
                         .user = uid,
+                        .codec = pt_codec,
+                        .assembler = video_rtp.FrameAssembler.init(std.heap.page_allocator),
+                    };
+                    slot = rx;
+                    break;
+                }
+            }
+        }
+        if (slot == null and uid != 0) {
+            for (&w.video_rx) |*rx| {
+                if (rx.active and rx.user == uid) {
+                    rx.deinit();
+                    rx.* = .{
+                        .active = true,
+                        .ssrc = ssrc,
+                        .user = uid,
+                        .codec = pt_codec,
                         .assembler = video_rtp.FrameAssembler.init(std.heap.page_allocator),
                     };
                     slot = rx;
@@ -2550,8 +2588,9 @@ const Worker = struct {
         }
         const rx = slot orelse return;
         if (uid != 0 and rx.user == 0) rx.user = uid;
+        if (pt_codec) |pc| rx.codec = pc;
 
-        const vcodec = w.rx_video_codec;
+        const vcodec = rx.codec orelse w.rx_video_codec;
         switch (rx.assembler.pushPacket(vcodec, seq, ts, marker, payload)) {
             .pending => {},
             .dropped => |d| {
@@ -2704,6 +2743,24 @@ const Worker = struct {
     }
 };
 
+fn codecFromPayloadType(pt: u7) ?video_cfg.Codec {
+    return switch (pt) {
+        101 => .h264,
+        103 => .vp8,
+        105 => .vp9,
+        107 => .hevc,
+        109 => .av1,
+        else => null,
+    };
+}
+
+fn isVideoRtxPt(pt: u7) bool {
+    return switch (pt) {
+        97, 99, 102, 104, 106, 108, 110 => true,
+        else => false,
+    };
+}
+
 fn ffDecoderNames(codec: video_cfg.Codec) []const [*:0]const u8 {
     return switch (codec) {
         .vp8 => &.{"vp8"},
@@ -2719,7 +2776,7 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     const mu = w.dec_mu orelse return 0;
     const cond = w.dec_cond orelse return 0;
 
-    var slots: [8]DecSlot = @splat(.{});
+    var slots: [16]DecSlot = @splat(.{});
     defer for (&slots) |*ds| ds.deinit();
 
     var local_au: []u8 = &.{};
@@ -2731,7 +2788,7 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         while (w.dec_count == 0 and w.dec_drop_n == 0 and w.dec_drop_user.load(.acquire) == 0 and !w.dec_stop.load(.acquire)) {
             c.SDL_WaitCondition(cond, mu);
         }
-        var drop_local: [8]Id = @splat(0);
+        var drop_local: [16]Id = @splat(0);
         var drop_n: usize = 0;
         const single_drop = w.dec_drop_user.swap(0, .acq_rel);
         if (single_drop != 0) {
@@ -2906,6 +2963,7 @@ const VideoRxSlot = struct {
     got_keyframe: bool = false,
     ssrc: u32 = 0,
     user: Id = 0,
+    codec: ?video_cfg.Codec = null,
     last_pli_ms: i64 = 0,
     assembler: video_rtp.FrameAssembler = video_rtp.FrameAssembler.init(std.heap.page_allocator),
     dave_buf: []u8 = &.{},
@@ -3019,7 +3077,9 @@ const Source = struct {
     fn applyGain(s: *Source, v: *Voice) void {
         s.dsp = if (s.user != 0) v.dspOf(s.user) else .{};
         const st = s.stream orelse return;
-        _ = c.SDL_SetAudioStreamGain(st, if (s.user != 0) v.volumeOf(s.user) else 1);
+        const user_gain = if (s.user != 0) v.volumeOf(s.user) else 1;
+        const mult = if (v.is_stream and !v.video_capable) v.stream_gain.load(.acquire) else 1;
+        _ = c.SDL_SetAudioStreamGain(st, std.math.clamp(user_gain * mult, 0, 2));
     }
 };
 
@@ -3335,4 +3395,22 @@ test "Voice.daveGroup usa rtc_server_id - 1 para Go Live mesmo com rtc_channel_i
     defer stream.deinit();
     stream.setStreamMode("guild:1000:2000:3000");
     try t.expectEqual(@as(Id, 5544332210), stream.daveGroup());
+}
+
+test "codecFromPayloadType e isVideoRtxPt distinguem codecs por SSRC" {
+    const t = std.testing;
+    try t.expectEqual(@as(?video_cfg.Codec, .h264), codecFromPayloadType(101));
+    try t.expectEqual(@as(?video_cfg.Codec, .vp8), codecFromPayloadType(103));
+    try t.expectEqual(@as(?video_cfg.Codec, .vp9), codecFromPayloadType(105));
+    try t.expectEqual(@as(?video_cfg.Codec, .hevc), codecFromPayloadType(107));
+    try t.expectEqual(@as(?video_cfg.Codec, .av1), codecFromPayloadType(109));
+    try t.expectEqual(@as(?video_cfg.Codec, null), codecFromPayloadType(102));
+    try t.expect(isVideoRtxPt(97));
+    try t.expect(isVideoRtxPt(102));
+    try t.expect(isVideoRtxPt(104));
+    try t.expect(isVideoRtxPt(106));
+    try t.expect(isVideoRtxPt(108));
+    try t.expect(isVideoRtxPt(110));
+    try t.expect(!isVideoRtxPt(101));
+    try t.expect(!isVideoRtxPt(120));
 }

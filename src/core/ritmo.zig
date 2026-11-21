@@ -43,7 +43,7 @@ pub const MousePace = struct {
     /// seguinte, e sem outro evento ninguém pediria esse quadro.
     settle: u8 = 0,
 
-    pub const interval_ms: i64 = 33;
+    pub const interval_ms: i64 = 16;
     const settle_frames = 2;
 
     pub fn motion(m: *MousePace) void {

@@ -282,6 +282,8 @@ fn dmWith(ctx: *d.Ctx, uid: Id) ?Id {
     return null;
 }
 const id_mute_local: u8 = 39;
+const id_stream_vol: u8 = 140;
+const id_stream_mute: u8 = 141;
 const volume_row_h: f32 = 54;
 
 /// A pessoa está na call em que estamos (e não somos nós): como no Discord, o menu
@@ -431,6 +433,10 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
             if (voice_items) {
                 add(&items, &n, .{ .label = "Volume do usuário", .en = "User Volume", .id = id_volume, .sep = true });
                 add(&items, &n, .{ .label = "Silenciar para mim", .en = "Mute for Me", .id = id_mute_local, .on = ctx.st.volumes.isMuted(id) });
+                if (ctx.st.watch_owner == id) {
+                    add(&items, &n, .{ .label = "Volume da transmissão", .en = "Stream Volume", .id = id_stream_vol });
+                    add(&items, &n, .{ .label = "Silenciar transmissão", .en = "Mute Stream", .id = id_stream_mute, .on = ctx.st.settings.stream_muted });
+                }
                 if (ctx.store.streamOf(id) != null or ctx.store.voiceFlags(id).self_stream) {
                     add(&items, &n, .{ .label = "Assistir transmissão", .en = "Watch Stream", .id = 30 });
                 }
@@ -585,7 +591,7 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
     for (items[0..n]) |it| {
         if (it.sep) seps += 9;
         // O volume é uma linha mais alta (o nome em cima, o controle embaixo).
-        if (kind == .user and it.id == id_volume) seps += volume_row_h - row_h;
+        if (kind == .user and (it.id == id_volume or it.id == id_stream_vol)) seps += volume_row_h - row_h;
     }
     const mw: f32 = 220;
     // Menu do usuário: as contas embaixo (o menu cresce para cima).
@@ -638,8 +644,8 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
             d.line(idl, r.x + 10, yy + 4, r.right() - 10, yy + 4, ctx.col(.border), 1);
             yy += 9;
         }
-        if (kind == .user and it.id == id_volume) {
-            volumeRow(ctx, idl, .{ .x = r.x + 6, .y = yy, .w = r.w - 12, .h = volume_row_h - 2 }, id, it);
+        if (kind == .user and (it.id == id_volume or it.id == id_stream_vol)) {
+            volumeRow(ctx, idl, .{ .x = r.x + 6, .y = yy, .w = r.w - 12, .h = volume_row_h - 2 }, id, it, it.id == id_stream_vol);
             yy += volume_row_h;
             continue;
         }
@@ -717,20 +723,25 @@ fn guildColors(ctx: *d.Ctx, dl: *c.ImDrawList, guild: Id, r: d.Rect, y: f32) voi
 /// controle segue o mouse mesmo fora do menu, e soltar não fecha nada: o fundo do
 /// popup só fecha com um clique nele. Silenciada, o controle fica apagado e
 /// continua mostrando o volume para onde ela volta.
-fn volumeRow(ctx: *d.Ctx, dl: *c.ImDrawList, r: d.Rect, uid: Id, it: Item) void {
+fn volumeRow(ctx: *d.Ctx, dl: *c.ImDrawList, r: d.Rect, uid: Id, it: Item, is_stream: bool) void {
     const fam = ctx.ui;
     qa.mark(r, "menu:{s}", .{it.label});
     const tr: d.Rect = .{ .x = r.x + 12, .y = r.y + 34, .w = r.w - 24, .h = 6 };
     const hr: d.Rect = .{ .x = tr.x - 8, .y = tr.y - 11, .w = tr.w + 16, .h = 28 };
-    const hb = d.hit(ctx, 400, hr);
-    qa.mark(hr, "menu-volume:{d}", .{uid});
-    var vol = ctx.st.volumes.volume(uid);
+    const hb = d.hit(ctx, if (is_stream) 401 else 400, hr);
+    if (is_stream) qa.mark(hr, "menu-stream-volume:{d}", .{uid}) else qa.mark(hr, "menu-volume:{d}", .{uid});
+    var vol: f32 = if (is_stream)
+        @as(f32, @floatFromInt(@min(ctx.st.settings.stream_volume, 200))) / 100.0
+    else
+        ctx.st.volumes.volume(uid);
     if (hb.held) {
         const v = volumeAt(ctx.mouse.x, tr);
-        if (v != vol) ctx.act(.{ .set_voice_volume = .{ .user = uid, .volume = v } });
+        if (v != vol) {
+            if (is_stream) ctx.act(.{ .set_stream_volume = v }) else ctx.act(.{ .set_voice_volume = .{ .user = uid, .volume = v } });
+        }
         vol = v;
     }
-    const off = vol <= 0.001 or ctx.st.volumes.isMuted(uid);
+    const off = vol <= 0.001 or (if (is_stream) ctx.st.settings.stream_muted else ctx.st.volumes.isMuted(uid));
     _ = d.textClipped(dl, fam.get(.medium), 14, r.x + 10, r.y + 7, ctx.col(.text).mix(ctx.col(.muted), 0.15), i18n.tr(it.label, it.en), r.w - 66);
     var buf: [16]u8 = undefined;
     const pct = volumePct(vol);
@@ -738,7 +749,7 @@ fn volumeRow(ctx: *d.Ctx, dl: *c.ImDrawList, r: d.Rect, uid: Id, it: Item) void 
     const pw = d.width(fam.get(.semibold), 13, pt);
     const pr: d.Rect = .{ .x = r.right() - 10 - pw, .y = r.y + 8, .w = pw, .h = 16 };
     d.text(dl, fam.get(.semibold), 13, pr.x, pr.y, if (off) ctx.col(.faint) else ctx.col(.muted), pt);
-    qa.mark(pr, "menu-volume-pct:{d}:{d}", .{ uid, pct });
+    if (!is_stream) qa.mark(pr, "menu-volume-pct:{d}:{d}", .{ uid, pct });
     const k = std.math.clamp(vol / 2.0, 0, 1);
     d.rect(dl, tr, ctx.col(.overlay).mix(ctx.col(.text), if (hb.hovered or hb.held) 0.16 else 0.11), 3);
     // 100% = sem mudança.
@@ -874,6 +885,7 @@ fn choose(ctx: *d.Ctx, kind: state.MenuKind, id: Id, item: u8, r: d.Rect) void {
         22 => ctx.act(.{ .open_dm = id }),
         // Como o botão do mixer: o volume guardado fica, tirar o silêncio volta a ele.
         id_mute_local => ctx.act(.{ .set_voice_mute = .{ .user = id, .mute = !st.volumes.isMuted(id) } }),
+        id_stream_mute => ctx.act(.{ .set_stream_mute = !st.settings.stream_muted }),
         24 => if (ctx.store.user(id)) |u| copyFmt(ctx, "{s}", .{u.name}),
         28 => st.popup = .{ .menu = .{ .kind = .voice_move, .id = id, .x = r.x + r.w - 8, .y = r.y + r.h - 70 } },
         29 => if (movable(ctx, id)) |cs| ctx.act(.{ .move_member = .{ .guild = cs.info.guild, .user = id, .channel = null } }),
@@ -998,11 +1010,13 @@ fn mixer(ctx: *d.Ctx, x: f32, y: f32) void {
     };
     const wd: f32 = 318;
     const header: f32 = 52;
+    const watching_other = ctx.st.watch_owner != 0 and ctx.st.watch_owner != ctx.store.me;
+    const stream_sec_h: f32 = if (watching_other) 54 else 0;
     const row: f32 = 68;
     const max_h = @max(ctx.win.h - 24, 120);
-    const fit_rows: usize = @intFromFloat(@max((max_h - header - 12) / row, 1));
+    const fit_rows: usize = @intFromFloat(@max((max_h - header - stream_sec_h - 12) / row, 1));
     const shown = @min(@min(count, 9), fit_rows);
-    const h: f32 = @min(header + @as(f32, @floatFromInt(@max(shown, 1))) * row + (if (count > shown) @as(f32, 20) else 0) + 12, max_h);
+    const h: f32 = @min(header + stream_sec_h + @as(f32, @floatFromInt(@max(shown, 1))) * row + (if (count > shown) @as(f32, 20) else 0) + 12, max_h);
     const r = fit(ctx, x, y, wd, h);
     const dl = beginWindow("##voice-mixer", r);
     defer c.ImGui_End();
@@ -1025,13 +1039,50 @@ fn mixer(ctx: *d.Ctx, x: f32, y: f32) void {
     d.line(dl, xc + 5, xy - 5, xc - 5, xy + 5, ctx.col(.muted), 1.8);
     if (xh.clicked) return close(ctx);
 
+    if (watching_other) {
+        const sr: d.Rect = .{ .x = r.x + 8, .y = r.y + header, .w = r.w - 16, .h = stream_sec_h - 6 };
+        d.rect(dl, sr, ctx.col(.surface).alpha(0.75), 8);
+        d.border(dl, sr, ctx.col(.accent).alpha(0.28), 8, 1);
+        d.text(dl, ctx.ui.get(.bold), 11.5, sr.x + 10, sr.y + 6, ctx.col(.text), i18n.tr("Áudio da transmissão", "Stream audio"));
+        const sname = ctx.store.nameIn(cs.info.guild, ctx.st.watch_owner) orelse "";
+        _ = d.textClipped(dl, ctx.ui.get(.regular), 10.5, sr.x + 10, sr.y + 23, ctx.col(.muted), sname, 114);
+
+        const s_vol = @as(f32, @floatFromInt(@min(ctx.st.settings.stream_volume, 200))) / 100.0;
+        const s_muted = ctx.st.settings.stream_muted;
+        const s_off = s_vol <= 0.001 or s_muted;
+        const tr: d.Rect = .{ .x = sr.x + 134, .y = sr.y + sr.h / 2 - 2, .w = 92, .h = 6 };
+        const hr: d.Rect = .{ .x = tr.x - 6, .y = tr.y - 9, .w = tr.w + 12, .h = 20 };
+        const hb = d.hit(ctx, 7180, hr);
+        qa.mark(hr, "stream-mixer-volume", .{});
+        if (hb.held) ctx.act(.{ .set_stream_volume = volumeAt(ctx.mouse.x, tr) });
+        const sk = std.math.clamp(s_vol / 2.0, 0, 1);
+        d.rect(dl, tr, ctx.col(.sidebar).mix(ctx.col(.text), 0.1), 3);
+        d.line(dl, tr.x + tr.w / 2, tr.y - 2, tr.x + tr.w / 2, tr.y + tr.h + 2, ctx.col(.faint).alpha(0.7), 1);
+        d.rect(dl, .{ .x = tr.x, .y = tr.y, .w = tr.w * sk, .h = tr.h }, if (s_off) ctx.col(.faint) else ctx.col(.accent), 3);
+        d.rect(dl, .{ .x = tr.x + tr.w * sk - 5, .y = tr.y - 4, .w = 10, .h = 14 }, d.Rgba.white, 3);
+
+        var sbuf: [16]u8 = undefined;
+        const spct = std.fmt.bufPrint(&sbuf, "{d}%", .{volumePct(s_vol)}) catch "";
+        d.text(dl, ctx.ui.get(.semibold), 11, tr.right() + 8, tr.y - 4, if (s_off) ctx.col(.faint) else ctx.col(.muted), spct);
+
+        const mr: d.Rect = .{ .x = sr.right() - 30, .y = sr.y + sr.h / 2 - 13, .w = 26, .h = 26 };
+        const mh = d.hit(ctx, 7181, mr);
+        qa.mark(mr, "stream-mixer-mute", .{});
+        if (mh.hovered) d.rect(dl, mr, ctx.col(.hover), 6);
+        const ink = if (s_off) ctx.col(.faint) else ctx.col(.muted).mix(ctx.col(.text), if (mh.hovered) 0.5 else 0.15);
+        icons.speaker(dl, mr.x + 13, mr.y + 13, ink.u());
+        if (s_muted) d.line(dl, mr.x + 6, mr.y + 20, mr.x + 20, mr.y + 6, ctx.col(.danger), 1.8);
+        if (mh.clicked) ctx.act(.{ .set_stream_mute = !s_muted });
+        if (mh.hovered) d.tip(ctx, mr, if (s_muted) i18n.tr("Desmutar áudio da transmissão", "Unmute stream audio") else i18n.tr("Silenciar áudio da transmissão", "Mute stream audio"), true);
+    }
+
     if (count == 0) {
-        d.text(dl, ctx.ui.get(.regular), 12, r.x + 16, r.y + header + 8, ctx.col(.muted), i18n.tr("só você na call", "you're alone in the call"));
+        d.text(dl, ctx.ui.get(.regular), 12, r.x + 16, r.y + header + stream_sec_h + 8, ctx.col(.muted), i18n.tr("só você na call", "you're alone in the call"));
         return;
     }
 
     // Linhas: avatar + nome + slider + porcentagem + botão de mudo.
-    var yy = r.y + header;
+    var yy = r.y + header + stream_sec_h;
     var drawn: usize = 0;
     for (cs.voice_members.items) |uid| {
         if (uid == ctx.store.me) continue;

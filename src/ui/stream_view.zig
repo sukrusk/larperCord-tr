@@ -10,6 +10,7 @@ const i18n = @import("i18n.zig");
 const live_video = @import("live_video.zig");
 const video_cfg = @import("../core/video_cfg.zig");
 const remote_ctrl = @import("../net/remote_ctrl.zig");
+const w = @import("widgets.zig");
 
 var remote_seq: u32 = 1;
 var last_norm: ?[2]u16 = null;
@@ -126,12 +127,7 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
             ram_mb,
         }) catch name;
     } else name;
-    const hud_w = @min(d.width(fam.get(.semibold), 12, hud) + 20, r.w * 0.56);
-    const hr: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = hud_w, .h = 26 };
-    d.rect(dl, hr, d.Rgba.hex(0x0a0c10).alpha(0.8), 6);
-    _ = d.textClipped(dl, fam.get(.semibold), 12, hr.x + 10, d.centerY(hr, 12), d.Rgba.white, hud, hr.w - 16);
-
-    // HUD superior direito: Fechar / Tela cheia / Zoom / Keyframe / Fonte / Controle remoto.
+    // HUD superior direito: Fechar / Tela cheia / Zoom / Câmeras / Volume ou Configurações / Controle remoto.
     var bx = r.right() - 10;
     const bh: f32 = 28;
     const by = r.y + 10;
@@ -141,10 +137,11 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     const xr: d.Rect = .{ .x = bx, .y = by, .w = bh, .h = bh };
     const xh = d.hit(ctx, 0x9201, xr);
     qa.mark(xr, "stream-close", .{});
-    d.rect(dl, xr, (if (xh.hovered) ctx.col(.danger) else d.Rgba.hex(0x14161c).alpha(0.82)), 6);
+    d.rect(dl, xr, (if (xh.hovered) ctx.col(.danger) else d.Rgba.hex(0x14161c).alpha(0.84)), 6);
     d.line(dl, xr.x + 9, xr.y + 9, xr.right() - 9, xr.bottom() - 9, d.Rgba.white, 1.8);
     d.line(dl, xr.right() - 9, xr.y + 9, xr.x + 9, xr.bottom() - 9, d.Rgba.white, 1.8);
     if (xh.clicked) {
+        ctx.st.stream_settings_open = false;
         if (is_cam) {
             ctx.st.spotlight_cam = 0;
             ctx.st.spotlight_fullscreen = false;
@@ -158,33 +155,92 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     const fr: d.Rect = .{ .x = bx, .y = by, .w = bh, .h = bh };
     const fh = d.hit(ctx, 0x9202, fr);
     qa.mark(fr, "stream-fullscreen", .{});
-    d.rect(dl, fr, (if (ctx.st.spotlight_fullscreen) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.82)).mix(d.Rgba.white, if (fh.hovered) 0.14 else 0), 6);
+    d.rect(dl, fr, (if (ctx.st.spotlight_fullscreen) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.84)).mix(d.Rgba.white, if (fh.hovered) 0.14 else 0), 6);
     icons.fullscreen(dl, fr.x + fr.w / 2, fr.y + fr.h / 2, d.Rgba.white.u());
     if (fh.clicked) ctx.st.spotlight_fullscreen = !ctx.st.spotlight_fullscreen;
 
-    // Sığdır / Doldur (Zoom).
-    const z_lbl = if (zoom_fill) i18n.tr("Sığdır", "Fit") else i18n.tr("Doldur", "Fill");
+    // Sığdır / Ajustar (Zoom).
+    const z_lbl = if (zoom_fill) i18n.tr("Ajustar", "Fit") else i18n.tr("Preencher", "Fill");
     const zw = d.width(fam.get(.semibold), 12, z_lbl) + 18;
     bx -= zw + 6;
     const zr: d.Rect = .{ .x = bx, .y = by, .w = zw, .h = bh };
     const zh = d.hit(ctx, 0x9204, zr);
-    d.rect(dl, zr, (if (zoom_fill) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.82)).mix(d.Rgba.white, if (zh.hovered) 0.14 else 0), 6);
+    d.rect(dl, zr, (if (zoom_fill) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.84)).mix(d.Rgba.white, if (zh.hovered) 0.14 else 0), 6);
     d.text(dl, fam.get(.semibold), 12, zr.x + 9, d.centerY(zr, 12), d.Rgba.white, z_lbl);
     if (zh.clicked) zoom_fill = !zoom_fill;
 
     var ctrl_hovered = xh.hovered or fh.hovered or zh.hovered;
+
+    if (!is_cam) {
+        const cam_n = countActiveCams(ctx);
+        var clb: [32]u8 = undefined;
+        const c_lbl = if (cam_n > 0)
+            (std.fmt.bufPrint(&clb, "{s} ({d})", .{ i18n.tr("Câmeras", "Cameras"), cam_n }) catch i18n.tr("Câmeras", "Cameras"))
+        else
+            i18n.tr("Câmeras", "Cameras");
+        const cw_cam = d.width(fam.get(.semibold), 12, c_lbl) + 18;
+        bx -= cw_cam + 6;
+        const cmr: d.Rect = .{ .x = bx, .y = by, .w = cw_cam, .h = bh };
+        const cmh = d.hit(ctx, 0x9208, cmr);
+        ctrl_hovered = ctrl_hovered or cmh.hovered;
+        qa.mark(cmr, "stream-cams-btn", .{});
+        const cbg = if (ctx.st.stream_show_cams) ctx.col(.accent).alpha(0.92) else d.Rgba.hex(0x14161c).alpha(0.84);
+        d.rect(dl, cmr, cbg.mix(d.Rgba.white, if (cmh.hovered) 0.14 else 0), 6);
+        d.text(dl, fam.get(.semibold), 12, cmr.x + 9, d.centerY(cmr, 12), d.Rgba.white, c_lbl);
+        if (cmh.clicked) ctx.act(.toggle_stream_cams);
+        if (cmh.hovered) d.tip(ctx, cmr, if (ctx.st.stream_show_cams) i18n.tr("Ocultar câmeras da call", "Hide call cameras") else i18n.tr("Mostrar câmeras junto à transmissão", "Show call cameras alongside stream"), true);
+    }
+
     if (owner != ctx.store.me) {
-        const kf_lbl = i18n.tr("Kare İste", "Keyframe");
+        const kf_lbl = i18n.tr("Solicitar quadro", "Keyframe");
         const kfw = d.width(fam.get(.semibold), 12, kf_lbl) + 18;
         bx -= kfw + 6;
         const kfr: d.Rect = .{ .x = bx, .y = by, .w = kfw, .h = bh };
         const kfh = d.hit(ctx, 0x9205, kfr);
         ctrl_hovered = ctrl_hovered or kfh.hovered;
-        d.rect(dl, kfr, d.Rgba.hex(0x14161c).alpha(0.82).mix(d.Rgba.white, if (kfh.hovered) 0.14 else 0), 6);
+        d.rect(dl, kfr, d.Rgba.hex(0x14161c).alpha(0.84).mix(d.Rgba.white, if (kfh.hovered) 0.14 else 0), 6);
         d.text(dl, fam.get(.semibold), 12, kfr.x + 9, d.centerY(kfr, 12), d.Rgba.white, kf_lbl);
         if (kfh.clicked) ctx.act(.request_keyframe);
+
+        if (!is_cam and r.w >= 460) {
+            const s_muted = ctx.st.settings.stream_muted;
+            const s_vol = @as(f32, @floatFromInt(@min(ctx.st.settings.stream_volume, 200))) / 100.0;
+            const s_off = s_muted or s_vol <= 0.001;
+            const pct_u: u16 = @intFromFloat(@round(std.math.clamp(s_vol, 0, 2) * 100));
+            var vpb: [12]u8 = undefined;
+            const vpt = std.fmt.bufPrint(&vpb, "{d}%", .{pct_u}) catch "100%";
+            const vol_w: f32 = 148;
+            bx -= vol_w + 6;
+            const vr_box: d.Rect = .{ .x = bx, .y = by, .w = vol_w, .h = bh };
+            d.rect(dl, vr_box, d.Rgba.hex(0x14161c).alpha(0.86), 6);
+
+            const vmr: d.Rect = .{ .x = vr_box.x + 2, .y = vr_box.y + 1, .w = 26, .h = bh - 2 };
+            const vmh = d.hit(ctx, 0x9209, vmr);
+            qa.mark(vmr, "stream-mute-btn", .{});
+            if (vmh.hovered) d.rect(dl, vmr, d.Rgba.white.alpha(0.12), 5);
+            icons.speaker(dl, vmr.x + 13, vmr.y + 13, (if (s_off) ctx.col(.faint) else d.Rgba.white).u());
+            if (s_muted) d.line(dl, vmr.x + 6, vmr.y + 20, vmr.x + 20, vmr.y + 6, ctx.col(.danger), 1.8);
+            if (vmh.clicked) ctx.act(.{ .set_stream_mute = !s_muted });
+            if (vmh.hovered) d.tip(ctx, vmr, if (s_muted) i18n.tr("Desmutar áudio da transmissão", "Unmute stream audio") else i18n.tr("Silenciar áudio da transmissão", "Mute stream audio"), true);
+
+            const vtr: d.Rect = .{ .x = vmr.right() + 4, .y = vr_box.y + bh / 2 - 2.5, .w = 72, .h = 5 };
+            const vhr: d.Rect = .{ .x = vtr.x - 5, .y = vr_box.y, .w = vtr.w + 10, .h = bh };
+            const vhh = d.hit(ctx, 0x920A, vhr);
+            qa.mark(vhr, "stream-vol-slider", .{});
+            if (vhh.held) {
+                const raw = std.math.clamp((ctx.mouse.x - vtr.x) / vtr.w, 0, 1);
+                ctx.act(.{ .set_stream_volume = @round(raw * 200.0) / 100.0 });
+            }
+            const sk = std.math.clamp(s_vol / 2.0, 0, 1);
+            d.rect(dl, vtr, d.Rgba.white.alpha(0.18), 3);
+            d.line(dl, vtr.x + vtr.w / 2, vtr.y - 2, vtr.x + vtr.w / 2, vtr.bottom() + 2, d.Rgba.white.alpha(0.45), 1);
+            d.rect(dl, .{ .x = vtr.x, .y = vtr.y, .w = vtr.w * sk, .h = vtr.h }, if (s_off) ctx.col(.faint) else ctx.col(.accent), 3);
+            d.rect(dl, .{ .x = vtr.x + vtr.w * sk - 4, .y = vtr.y - 3.5, .w = 8, .h = 12 }, d.Rgba.white, 3);
+            d.text(dl, fam.get(.semibold), 11, vtr.right() + 6, d.centerY(vr_box, 11), if (s_off) ctx.col(.faint) else d.Rgba.white, vpt);
+            ctrl_hovered = ctrl_hovered or vr_box.contains(ctx.mouse.x, ctx.mouse.y) or vhh.held;
+        }
     } else if (!is_cam and ctx.st.stream_on) {
-        const stop_lbl = i18n.tr("Durdur", "Stop");
+        const stop_lbl = i18n.tr("Parar", "Stop");
         const sw = d.width(fam.get(.semibold), 12, stop_lbl) + 18;
         bx -= sw + 6;
         const sr: d.Rect = .{ .x = bx, .y = by, .w = sw, .h = bh };
@@ -194,15 +250,30 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
         d.text(dl, fam.get(.semibold), 12, sr.x + 9, d.centerY(sr, 12), d.Rgba.white, stop_lbl);
         if (sh.clicked) ctx.act(.stop_screen_share);
 
-        const chg_lbl = i18n.tr("Kaynak Değiştir", "Switch source");
+        const chg_lbl = i18n.tr("Trocar tela", "Switch source");
         const cw = d.width(fam.get(.semibold), 12, chg_lbl) + 18;
         bx -= cw + 6;
         const cr: d.Rect = .{ .x = bx, .y = by, .w = cw, .h = bh };
         const ch = d.hit(ctx, 0x9206, cr);
         ctrl_hovered = ctrl_hovered or ch.hovered;
-        d.rect(dl, cr, d.Rgba.hex(0x14161c).alpha(0.82).mix(d.Rgba.white, if (ch.hovered) 0.14 else 0), 6);
+        d.rect(dl, cr, d.Rgba.hex(0x14161c).alpha(0.84).mix(d.Rgba.white, if (ch.hovered) 0.14 else 0), 6);
         d.text(dl, fam.get(.semibold), 12, cr.x + 9, d.centerY(cr, 12), d.Rgba.white, chg_lbl);
-        if (ch.clicked) ctx.act(.open_stream_picker);
+        if (ch.clicked) {
+            ctx.st.stream_settings_open = false;
+            ctx.act(.open_stream_picker);
+        }
+
+        const set_lbl = i18n.tr("Configurações", "Stream settings");
+        const sgw = d.width(fam.get(.semibold), 12, set_lbl) + 18;
+        bx -= sgw + 6;
+        const sgr: d.Rect = .{ .x = bx, .y = by, .w = sgw, .h = bh };
+        const sgh = d.hit(ctx, 0x920B, sgr);
+        ctrl_hovered = ctrl_hovered or sgh.hovered;
+        qa.mark(sgr, "stream-settings-btn", .{});
+        const sbg = if (ctx.st.stream_settings_open) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.84);
+        d.rect(dl, sgr, sbg.mix(d.Rgba.white, if (sgh.hovered) 0.14 else 0), 6);
+        d.text(dl, fam.get(.semibold), 12, sgr.x + 9, d.centerY(sgr, 12), d.Rgba.white, set_lbl);
+        if (sgh.clicked) ctx.st.stream_settings_open = !ctx.st.stream_settings_open;
     }
 
     // Botão Pedir/Parar Controle Remoto (quando assistindo outra pessoa).
@@ -258,6 +329,27 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
                 }
             }
         }
+    }
+
+    if (!is_cam and owner == ctx.store.me and ctx.st.stream_on and ctx.st.stream_settings_open) {
+        ctrl_hovered = drawStreamSettingsPopover(ctx, r, by + bh + 6) or ctrl_hovered;
+    }
+
+    const avail_hud_w = bx - r.x - 18;
+    if (avail_hud_w >= 64) {
+        const hud_w = @min(d.width(fam.get(.semibold), 12, hud) + 20, avail_hud_w);
+        const hr: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = hud_w, .h = 26 };
+        d.rect(dl, hr, d.Rgba.hex(0x0a0c10).alpha(0.8), 6);
+        _ = d.textClipped(dl, fam.get(.semibold), 12, hr.x + 10, d.centerY(hr, 12), d.Rgba.white, hud, hr.w - 16);
+    } else if (r.h >= 120) {
+        const hud_w = @min(d.width(fam.get(.semibold), 12, hud) + 20, r.w - 20);
+        const hr: d.Rect = .{ .x = r.x + 10, .y = by + bh + 6, .w = hud_w, .h = 26 };
+        d.rect(dl, hr, d.Rgba.hex(0x0a0c10).alpha(0.8), 6);
+        _ = d.textClipped(dl, fam.get(.semibold), 12, hr.x + 10, d.centerY(hr, 12), d.Rgba.white, hud, hr.w - 16);
+    }
+
+    if (!is_cam and ctx.st.stream_show_cams and (!ctx.st.call_view or ctx.st.spotlight_fullscreen or r.h < 280)) {
+        ctrl_hovered = drawCamOverlayStrip(ctx, r) or ctrl_hovered;
     }
 
     // Captura de entrada remota quando o controle estilo AnyDesk estiver ativo no espectador.
@@ -383,6 +475,262 @@ fn hasHeldRemote() bool {
     return false;
 }
 
+fn countActiveCams(ctx: *const d.Ctx) usize {
+    const vc = ctx.st.voice orelse return if (ctx.st.cam_on) 1 else 0;
+    const cs = ctx.store.channel(vc) orelse return if (ctx.st.cam_on) 1 else 0;
+    var n: usize = 0;
+    for (cs.voice_members.items) |uid| {
+        if (uid == ctx.store.me) {
+            if (ctx.st.cam_on) n += 1;
+        } else if (live_video.eng.peerCamSlot(uid) != null or ctx.store.voiceFlags(uid).self_video) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Strip flutuante com as câmeras ativas da call sobre o palco da transmissão (DM, chat ou tela cheia).
+fn drawCamOverlayStrip(ctx: *d.Ctx, r: d.Rect) bool {
+    if (r.w < 260 or r.h < 220) return false;
+    const vc = ctx.st.voice orelse return false;
+    const cs = ctx.store.channel(vc) orelse return false;
+    var cams: [6]u64 = undefined;
+    var n: usize = 0;
+    // Prioriza quem já tem quadro decodificado no momento, depois self_video.
+    for (cs.voice_members.items) |uid| {
+        if (n >= cams.len) break;
+        const has_slot = if (uid == ctx.store.me) ctx.st.cam_on else live_video.eng.peerCamSlot(uid) != null;
+        if (has_slot) {
+            cams[n] = uid;
+            n += 1;
+        }
+    }
+    for (cs.voice_members.items) |uid| {
+        if (n >= cams.len) break;
+        if (uid == ctx.store.me or live_video.eng.peerCamSlot(uid) != null) continue;
+        if (ctx.store.voiceFlags(uid).self_video) {
+            cams[n] = uid;
+            n += 1;
+        }
+    }
+    if (n == 0) return false;
+
+    const dl = ctx.dl;
+    const fam = ctx.ui;
+    const gap: f32 = 8;
+    const max_shown: usize = @min(n, 4);
+    const max_w = @max(r.w - 28, 120);
+    const tile_w: f32 = std.math.clamp(@floor((max_w - @as(f32, @floatFromInt(max_shown - 1)) * gap) / @as(f32, @floatFromInt(max_shown))), 112, 174);
+    const tile_h: f32 = @round(tile_w * 9.0 / 16.0);
+    const total_w = tile_w * @as(f32, @floatFromInt(max_shown)) + gap * @as(f32, @floatFromInt(max_shown - 1));
+    var tx = r.right() - 12 - total_w;
+    const ty = r.bottom() - tile_h - 12;
+
+    var hovered_any = false;
+    for (cams[0..max_shown], 0..) |uid, idx| {
+        const cr: d.Rect = .{ .x = tx, .y = ty, .w = tile_w, .h = tile_h };
+        const hb = d.hit(ctx, 0x9300 + idx, cr);
+        hovered_any = hovered_any or hb.hovered;
+        const speaking = ctx.store.isSpeaking(uid, ctx.now_ms);
+        d.shadow(dl, cr, 8, 10, ctx.col(.shadow).alpha(0.55));
+        d.rect(dl, cr, d.Rgba.hex(0x11141c).alpha(0.92), 8);
+        const slot_opt: ?*live_video.FrameSlot = if (uid == ctx.store.me) &live_video.eng.cam_slot else live_video.eng.peerCamSlot(uid);
+        var drew = false;
+        if (slot_opt) |sp| {
+            if (sp.view(ctx.images.renderer)) |cv| {
+                const mirror = uid == ctx.store.me and ctx.st.settings.video_cam_mirror;
+                c.ImDrawList_AddImageRounded(
+                    dl,
+                    cv.ref,
+                    d.v(cr.x + 2, cr.y + 2),
+                    d.v(cr.right() - 2, cr.bottom() - 2),
+                    if (mirror) d.v(1, 0) else d.v(0, 0),
+                    if (mirror) d.v(0, 1) else d.v(1, 1),
+                    d.Rgba.white.u(),
+                    6,
+                    0,
+                );
+                drew = true;
+            }
+        }
+        if (!drew) {
+            w.avatarAt(ctx, dl, cs.info.guild, cr.x + cr.w / 2, cr.y + cr.h * 0.44, 34, uid, .circle, null, 1, .{ .animate = false, .request = 64 });
+        }
+        d.border(dl, cr, if (speaking) ctx.col(.online) else if (hb.hovered) ctx.col(.accent) else ctx.col(.border), 8, if (speaking) 2.5 else 1);
+        const cname = ctx.store.nameIn(cs.info.guild, uid) orelse "?";
+        const nbw = @min(d.width(fam.get(.semibold), 10.5, cname) + 12, cr.w - 12);
+        const nr: d.Rect = .{ .x = cr.x + 6, .y = cr.bottom() - 22, .w = nbw, .h = 16 };
+        d.rect(dl, nr, d.Rgba.hex(0x0a0c10).alpha(0.78), 4);
+        _ = d.textClipped(dl, fam.get(.semibold), 10.5, nr.x + 6, d.centerY(nr, 10.5), d.Rgba.white, cname, nbw - 12);
+        qa.mark(cr, "stream-cam-pip:{d}", .{uid});
+        if (hb.clicked) {
+            ctx.st.spotlight_cam = if (ctx.st.spotlight_cam == uid) 0 else uid;
+        } else if (hb.right) {
+            ctx.popup(.{ .menu = .{ .kind = .user, .id = uid, .x = ctx.mouse.x, .y = ctx.mouse.y } });
+        }
+        tx += tile_w + gap;
+    }
+    return hovered_any;
+}
+
+/// Painel rápido ao vivo para alterar resolução, FPS, bitrate, preset, áudio e cursor sem cair da live.
+fn drawStreamSettingsPopover(ctx: *d.Ctx, r: d.Rect, top_y: f32) bool {
+    const pw: f32 = @min(312, @max(r.w - 24, 220));
+    const ph: f32 = 304;
+    if (r.h < top_y - r.y + ph + 16) return false;
+    const pr: d.Rect = .{ .x = r.right() - 10 - pw, .y = top_y, .w = pw, .h = ph };
+    const dl = ctx.dl;
+    const fam = ctx.ui;
+    qa.mark(pr, "stream-settings-popover", .{});
+    d.shadow(dl, pr, 10, 18, ctx.col(.shadow).alpha(0.65));
+    d.rect(dl, pr, ctx.col(.elevated).alpha(0.97), 10);
+    d.border(dl, pr, ctx.col(.border), 10, 1);
+
+    const cfg = ctx.st.stream_cfg;
+    var next = cfg;
+    var changed = false;
+
+    const pad: f32 = 12;
+    const cw = pr.w - pad * 2;
+    var yy = pr.y + 10;
+    d.text(dl, fam.get(.bold), 13, pr.x + pad, yy, ctx.col(.text), i18n.tr("Configurações da transmissão", "Live Stream Settings"));
+    yy += 24;
+
+    // Resolução
+    d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Resolução", "Resolution"));
+    yy += 16;
+    const res_opts = [_]video_cfg.Resolution{ .p720, .p1080, .p1440, .p2160 };
+    const res_lbls = [_][]const u8{ "720p", "1080p", "1440p", "4K" };
+    if (pillRow(ctx, dl, fam, 0x9260, pr.x + pad, yy, cw, &res_lbls, blk: {
+        var idx: usize = 1;
+        for (res_opts, 0..) |ro, i| if (ro == cfg.resolution) {
+            idx = i;
+            break;
+        };
+        break :blk idx;
+    })) |picked| {
+        next.resolution = res_opts[picked];
+        if (ctx.st.settings.video_bitrate_mbps == 0) {
+            next.bitrate_kbps = next.resolution.defaultBitrateKbps(next.fps);
+        }
+        changed = true;
+    }
+    yy += 30;
+
+    // FPS
+    d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Taxa de quadros", "Frame rate"));
+    yy += 16;
+    const fps_lbls = [_][]const u8{ "30 FPS", "60 FPS" };
+    if (pillRow(ctx, dl, fam, 0x9268, pr.x + pad, yy, cw, &fps_lbls, if (cfg.fps >= 45) 1 else 0)) |picked| {
+        next.fps = if (picked == 1) 60 else 30;
+        if (ctx.st.settings.video_bitrate_mbps == 0) {
+            next.bitrate_kbps = next.resolution.defaultBitrateKbps(next.fps);
+        }
+        changed = true;
+    }
+    yy += 30;
+
+    // Bitrate
+    d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Taxa de bits (Bitrate)", "Bitrate"));
+    yy += 16;
+    const auto_br = cfg.resolution.defaultBitrateKbps(cfg.fps);
+    const br_cur: usize = if (cfg.bitrate_kbps == auto_br and ctx.st.settings.video_bitrate_mbps == 0)
+        0
+    else if (cfg.bitrate_kbps <= 4500)
+        1
+    else if (cfg.bitrate_kbps <= 9000)
+        2
+    else if (cfg.bitrate_kbps <= 16500)
+        3
+    else
+        4;
+    const br_lbls = [_][]const u8{ i18n.tr("Auto", "Auto"), "4M", "8M", "15M", "25M" };
+    if (pillRow(ctx, dl, fam, 0x9270, pr.x + pad, yy, cw, &br_lbls, br_cur)) |picked| {
+        next.bitrate_kbps = switch (picked) {
+            1 => 4000,
+            2 => 8000,
+            3 => 15000,
+            4 => 25000,
+            else => next.resolution.defaultBitrateKbps(next.fps),
+        };
+        ctx.st.settings.video_bitrate_mbps = switch (picked) {
+            1 => 4,
+            2 => 8,
+            3 => 15,
+            4 => 25,
+            else => 0,
+        };
+        changed = true;
+    }
+    yy += 30;
+
+    // Preset de desempenho
+    d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Desempenho", "Performance"));
+    yy += 16;
+    const pf_lbls = [_][]const u8{ i18n.tr("Velocidade", "Speed"), i18n.tr("Equilibrado", "Balanced"), i18n.tr("Qualidade", "Quality") };
+    if (pillRow(ctx, dl, fam, 0x9278, pr.x + pad, yy, cw, &pf_lbls, @intFromEnum(cfg.perf_preset))) |picked| {
+        next.perf_preset = video_cfg.PerfPreset.fromByte(@intCast(picked));
+        ctx.st.settings.video_perf_preset = @intCast(picked);
+        changed = true;
+    }
+    yy += 30;
+
+    // Toggles rápidos
+    if (miniToggle(ctx, dl, fam, 0x9280, .{ .x = pr.x + pad, .y = yy, .w = cw, .h = 22 }, i18n.tr("Áudio do sistema", "System audio"), cfg.share_audio)) {
+        next.share_audio = !cfg.share_audio;
+        changed = true;
+    }
+    yy += 24;
+    if (miniToggle(ctx, dl, fam, 0x9281, .{ .x = pr.x + pad, .y = yy, .w = cw, .h = 22 }, i18n.tr("Capturar cursor do mouse", "Capture mouse cursor"), cfg.capture_cursor)) {
+        next.capture_cursor = !cfg.capture_cursor;
+        changed = true;
+    }
+    yy += 24;
+    if (miniToggle(ctx, dl, fam, 0x9282, .{ .x = pr.x + pad, .y = yy, .w = cw, .h = 22 }, i18n.tr("Pré-visualizar aqui", "Preview own stream"), cfg.preview_self)) {
+        next.preview_self = !cfg.preview_self;
+        changed = true;
+    }
+    yy += 26;
+
+    const sw_r: d.Rect = .{ .x = pr.x + pad, .y = yy, .w = cw, .h = 24 };
+    const swh = d.hit(ctx, 0x9283, sw_r);
+    d.rect(dl, sw_r, ctx.col(.hover).mix(ctx.col(.accent), if (swh.hovered) 0.3 else 0), 6);
+    const sw_lbl = i18n.tr("Trocar janela ou monitor…", "Switch window or display…");
+    d.text(dl, fam.get(.semibold), 11.5, sw_r.x + (sw_r.w - d.width(fam.get(.semibold), 11.5, sw_lbl)) / 2, d.centerY(sw_r, 11.5), ctx.col(.text), sw_lbl);
+    if (swh.clicked) {
+        ctx.st.stream_settings_open = false;
+        ctx.act(.open_stream_picker);
+    }
+
+    if (changed) ctx.act(.{ .update_stream_cfg = next });
+    return pr.contains(ctx.mouse.x, ctx.mouse.y);
+}
+
+fn pillRow(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, id_base: usize, x: f32, y: f32, w_tot: f32, labels: []const []const u8, cur: usize) ?usize {
+    const gap: f32 = 4;
+    const bw = (w_tot - gap * @as(f32, @floatFromInt(labels.len - 1))) / @as(f32, @floatFromInt(labels.len));
+    var out: ?usize = null;
+    for (labels, 0..) |lbl, i| {
+        const br: d.Rect = .{ .x = x + @as(f32, @floatFromInt(i)) * (bw + gap), .y = y, .w = bw, .h = 22 };
+        const hb = d.hit(ctx, id_base + i, br);
+        const sel = i == cur;
+        d.rect(dl, br, if (sel) ctx.col(.accent) else ctx.col(.surface).mix(ctx.col(.hover), if (hb.hovered) 1 else 0), 5);
+        _ = d.textClipped(dl, fam.get(.semibold), 11, br.x + 4, d.centerY(br, 11), if (sel) ctx.col(.accent_text) else ctx.col(.text), lbl, br.w - 8);
+        if (hb.clicked) out = i;
+    }
+    return out;
+}
+
+fn miniToggle(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, id: usize, r: d.Rect, lbl: []const u8, on: bool) bool {
+    const hb = d.hit(ctx, id, r);
+    if (hb.hovered) d.rect(dl, r, ctx.col(.hover).alpha(0.6), 5);
+    _ = d.textClipped(dl, fam.get(.medium), 11.5, r.x + 4, d.centerY(r, 11.5), ctx.col(.text), lbl, r.w - 44);
+    const sw: d.Rect = .{ .x = r.right() - 34, .y = r.y + (r.h - 16) / 2, .w = 30, .h = 16 };
+    d.rect(dl, sw, if (on) ctx.col(.online) else ctx.col(.faint).alpha(0.55), 8);
+    d.circle(dl, if (on) sw.right() - 8 else sw.x + 8, sw.y + 8, 6, d.Rgba.white);
+    return hb.clicked;
+}
+
 /// Libera todo o estado local de mouse/teclado remoto ao encerrar.
 pub fn resetRemoteInput() void {
     last_norm = null;
@@ -428,10 +776,21 @@ pub fn modalStage(ctx: *d.Ctx) void {
     const prev = ctx.dl;
     ctx.dl = c.ImGui_GetWindowDrawList();
     defer ctx.dl = prev;
-    if (st.spotlight_cam != 0) drawCam(ctx, wr, st.spotlight_cam) else draw(ctx, wr);
+    if (st.watch_owner != 0 and st.spotlight_cam != 0 and wr.w >= 420) {
+        const gap: f32 = 8;
+        const lw = @round((wr.w - gap) * 0.66);
+        draw(ctx, .{ .x = wr.x, .y = wr.y, .w = lw, .h = wr.h });
+        drawCam(ctx, .{ .x = wr.x + lw + gap, .y = wr.y, .w = @max(wr.w - lw - gap, 80), .h = wr.h }, st.spotlight_cam);
+    } else if (st.spotlight_cam != 0) {
+        drawCam(ctx, wr, st.spotlight_cam);
+    } else {
+        draw(ctx, wr);
+    }
 
     if (!modal_above and !@import("dropdown.zig").ownsEsc() and c.ImGui_IsKeyPressed(c.ImGuiKey_Escape)) {
-        if (st.spotlight_cam != 0) {
+        if (st.stream_settings_open) {
+            ctx.st.stream_settings_open = false;
+        } else if (st.spotlight_cam != 0) {
             ctx.st.spotlight_cam = 0;
             ctx.st.spotlight_fullscreen = false;
         } else {

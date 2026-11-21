@@ -239,7 +239,7 @@ pub const PeerCam = struct {
 pub const Engine = struct {
     cam_slot: FrameSlot = .{},
     watch_slot: FrameSlot = .{},
-    peer_cams: [4]PeerCam = @splat(.{}),
+    peer_cams: [12]PeerCam = @splat(.{}),
 
     cam: ?*c.SDL_Camera = null,
     cam_mu: ?*c.SDL_Mutex = null,
@@ -294,6 +294,8 @@ pub const Engine = struct {
     demo_fps: u8 = 60,
     demo_source: video_cfg.SourceKind = .demo_4k,
     demo_codec: video_cfg.Codec = .h264,
+    native_mu: ?*c.SDL_Mutex = null,
+    native_rev: std.atomic.Value(u32) = .init(0),
     native_cfg: video_cfg.StreamConfig = .{},
     native_mode: bool = false,
 
@@ -570,7 +572,13 @@ pub const Engine = struct {
                 }
             }
         }
-        const slot_pc = target orelse &self.peer_cams[0];
+        const slot_pc = target orelse blk: {
+            var oldest = &self.peer_cams[0];
+            for (&self.peer_cams) |*pc| {
+                if (pc.slot.fps_window_ms < oldest.slot.fps_window_ms) oldest = pc;
+            }
+            break :blk oldest;
+        };
         slot_pc.uid.store(peer, .release);
         slot_pc.slot.uploadNv12(w, h, y, @intCast(y_pitch), uv, @intCast(uv_pitch), .camera, codec, pts_ms);
         video_diag.uiUpload(false);
@@ -621,18 +629,44 @@ pub const Engine = struct {
     /// Inicia captura real de monitor (DXGI) ou janela (Windows.Graphics.Capture) em thread dedicada.
     pub fn startNativeCapture(self: *Engine, cfg: video_cfg.StreamConfig) bool {
         self.stopWatch();
+        if (self.native_mu == null) self.native_mu = c.SDL_CreateMutex();
+        if (self.native_mu) |m| _ = c.SDL_LockMutex(m);
         self.native_cfg = cfg;
+        _ = self.native_rev.fetchAdd(1, .acq_rel);
+        if (self.native_mu) |m| _ = c.SDL_UnlockMutex(m);
         self.native_mode = true;
         self.preview_wanted.store(cfg.preview_self, .release);
         self.cursor_wanted.store(cfg.capture_cursor, .release);
         syncRemoteTarget(cfg);
         self.demo_res = cfg.resolution;
-        self.demo_fps = if (cfg.fps >= 45) 60 else 30;
+        self.demo_fps = @max(cfg.fps, 15);
         self.demo_source = cfg.kind;
         self.demo_codec = cfg.codec;
         self.demo_stop.store(false, .release);
         self.demo_thread = c.SDL_CreateThread(nativeThreadMain, "cap-4k", self);
         return self.demo_thread != null;
+    }
+
+    /// Atualiza resolução, FPS, bitrate, cursor, áudio e monitor/janela sem fechar a thread.
+    pub fn updateNativeCapture(self: *Engine, cfg: video_cfg.StreamConfig) bool {
+        if (self.demo_thread == null or !self.native_mode) return self.startNativeCapture(cfg);
+        if (self.native_mu == null) self.native_mu = c.SDL_CreateMutex();
+        if (self.native_mu) |m| _ = c.SDL_LockMutex(m);
+        self.native_cfg = cfg;
+        _ = self.native_rev.fetchAdd(1, .acq_rel);
+        if (self.native_mu) |m| _ = c.SDL_UnlockMutex(m);
+        self.preview_wanted.store(cfg.preview_self, .release);
+        self.cursor_wanted.store(cfg.capture_cursor, .release);
+        self.demo_res = cfg.resolution;
+        self.demo_fps = @max(cfg.fps, 15);
+        self.demo_source = cfg.kind;
+        self.demo_codec = cfg.codec;
+        if (!cfg.preview_self) {
+            self.watch_slot.clear();
+            self.notifyFrame();
+        }
+        syncRemoteTarget(cfg);
+        return true;
     }
 
     pub fn refreshRemoteTarget(self: *Engine, cfg: video_cfg.StreamConfig) void {
@@ -989,6 +1023,10 @@ pub const Engine = struct {
             c.SDL_DestroyMutex(m);
             self.cam_mu = null;
         }
+        if (self.native_mu) |m| {
+            c.SDL_DestroyMutex(m);
+            self.native_mu = null;
+        }
     }
 
     fn ensureCamSubsys(self: *Engine) bool {
@@ -1262,9 +1300,12 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     const engine: *Engine = @ptrCast(@alignCast(data.?));
     sys.beginHiResTimer();
     defer sys.endHiResTimer();
-    const cfg = engine.native_cfg;
-    const interval_ms: u32 = if (engine.demo_fps >= 45) 16 else 33;
-    const interval_ns: u64 = if (engine.demo_fps >= 45) 16_666_667 else 33_333_333;
+    if (engine.native_mu) |m| _ = c.SDL_LockMutex(m);
+    var cfg = engine.native_cfg;
+    var cur_rev: u32 = engine.native_rev.load(.acquire);
+    if (engine.native_mu) |m| _ = c.SDL_UnlockMutex(m);
+    var interval_ms: u32 = @divTrunc(1000, @max(@as(u32, cfg.fps), 15));
+    var interval_ns: u64 = @divTrunc(1_000_000_000, @max(@as(u64, cfg.fps), 15));
 
     // Loopback (CoInitializeEx/CoUninitialize) deve ser aberto primeiro para que o defer rode POR ÚLTIMO,
     // após enc_opt.deinit() (MF COM) e src_opt.deinit() (WGC WinRT/D3D11).
@@ -1292,6 +1333,52 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     var next_tick_ns: u64 = c.SDL_GetTicksNS();
 
     while (!engine.demo_stop.load(.acquire)) {
+        const rev = engine.native_rev.load(.acquire);
+        if (rev != cur_rev) {
+            if (engine.native_mu) |m| _ = c.SDL_LockMutex(m);
+            const next_cfg = engine.native_cfg;
+            cur_rev = engine.native_rev.load(.acquire);
+            if (engine.native_mu) |m| _ = c.SDL_UnlockMutex(m);
+
+            const src_changed = next_cfg.kind != cfg.kind or next_cfg.target_id != cfg.target_id or
+                next_cfg.resolution != cfg.resolution or next_cfg.capture_backend != cfg.capture_backend;
+            const audio_changed = next_cfg.share_audio != cfg.share_audio or
+                (next_cfg.share_audio and next_cfg.kind == .window and (cfg.kind != .window or cfg.target_id != next_cfg.target_id));
+            const enc_changed = next_cfg.fps != cfg.fps or next_cfg.codec != cfg.codec or
+                next_cfg.hw_accel != cfg.hw_accel or next_cfg.perf_preset != cfg.perf_preset or
+                next_cfg.keyframe_sec != cfg.keyframe_sec or next_cfg.transport != cfg.transport;
+
+            if (src_changed or enc_changed or audio_changed) {
+                if (enc_opt) |*e| {
+                    e.deinit();
+                    enc_opt = null;
+                }
+            }
+            if (src_changed or audio_changed) {
+                if (src_opt) |*s| {
+                    s.deinit();
+                    src_opt = null;
+                }
+            }
+            if (audio_changed) {
+                if (lb_opt) |*lb| {
+                    lb.deinit();
+                    lb_opt = null;
+                }
+                if (next_cfg.share_audio) {
+                    const npid: u32 = if (next_cfg.kind == .window and next_cfg.target_id != 0) capture_backend.windowProcessId(next_cfg.target_id) else 0;
+                    lb_opt = capture_backend.Loopback.openSmart(npid, next_cfg.kind == .window) catch null;
+                }
+            }
+            if (next_cfg.bitrate_kbps != cfg.bitrate_kbps) {
+                last_br_kbps = next_cfg.bitrate_kbps;
+                if (enc_opt) |*e| e.setBitrate(last_br_kbps);
+            }
+            cfg = next_cfg;
+            interval_ms = @divTrunc(1000, @max(@as(u32, cfg.fps), 15));
+            interval_ns = @divTrunc(1_000_000_000, @max(@as(u64, cfg.fps), 15));
+            sticky_kf = true;
+        }
         if (src_opt == null) {
             if (cfg.kind == .window) {
                 src_opt = capture_backend.ScreenSource.openWindow(cfg.target_id, cfg.resolution) catch null;

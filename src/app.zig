@@ -1279,6 +1279,7 @@ pub const App = struct {
         app.st.call_view = false;
         app.st.cam_on = false;
         app.st.stream_on = false;
+        app.st.stream_settings_open = false;
         app.st.watch_owner = 0;
         app.st.spotlight_cam = 0;
         app.st.spotlight_fullscreen = false;
@@ -1425,6 +1426,8 @@ pub const App = struct {
         while (dit.next()) |uid| app.cmd(.{ .voice_dsp = .{ .user = uid.*, .denoise = true, .level = vs.levelOn(uid.*) } });
         var lit = vs.leveled.keyIterator();
         while (lit.next()) |uid| if (!vs.denoiseOn(uid.*)) app.cmd(.{ .voice_dsp = .{ .user = uid.*, .denoise = false, .level = true } });
+        const stream_gain: f32 = if (app.st.settings.stream_muted) 0 else @as(f32, @floatFromInt(@min(app.st.settings.stream_volume, 200))) / 100.0;
+        app.cmd(.{ .stream_volume = stream_gain });
     }
 
     /// Um arquivo de mascote mudou: relê a pasta e, se é o escolhido, avisa (recarregado,
@@ -1521,11 +1524,45 @@ pub const App = struct {
     }
 
     fn setTheme(app: *App, i: usize) void {
+        const prev_bg = app.themes.theme_().c(.bg).u();
         if (app.themes.load(i)) {
             app.applyThemeStyle();
+            if (!app.opts.qa and !app.st.settings.reduce_motion) {
+                app.st.theme_fade_col = prev_bg;
+                app.st.theme_fade_ms = now() + 190;
+            }
             app.st.showToast(now(), false, "tema: {s}", "theme: {s}", .{app.themes.name()});
             app.saveSettings();
         } else app.st.showToast(now(), true, "{s}", "{s}", .{app.themes.last_error orelse i18n.tr("erro no tema", "theme error")});
+    }
+
+    fn applyLiveStreamCfg(app: *App, cfg: video_cfg.StreamConfig) void {
+        const st = &app.st;
+        st.stream_cfg = cfg;
+        st.settings.video_res = @intFromEnum(cfg.resolution);
+        st.settings.video_fps = if (cfg.fps >= 55) 1 else 0;
+        st.settings.video_codec = @intFromEnum(cfg.codec);
+        const mbps_raw: u32 = cfg.bitrate_kbps / 1000;
+        st.settings.video_bitrate_mbps = if (cfg.bitrate_kbps == cfg.resolution.defaultBitrateKbps(cfg.fps)) 0 else @intCast(std.math.clamp(mbps_raw, 1, 50));
+        st.settings.video_hw = cfg.hw_accel;
+        st.settings.video_cursor = cfg.capture_cursor;
+        st.settings.video_self_preview = cfg.preview_self;
+        st.settings.remote_ctrl_allow = @intFromEnum(cfg.remote_perm);
+        if (st.remote_ctrl_status == .active_host) {
+            st.remote_ctrl_perm = cfg.remote_perm;
+            remote_ctrl.mgr.setPermission(cfg.remote_perm);
+        }
+        if (cfg.preview_self) {
+            st.watch_owner = app.store.me;
+        } else if (st.watch_owner == app.store.me) {
+            st.watch_owner = 0;
+            st.spotlight_fullscreen = false;
+        }
+        app.cmd(.{ .update_stream_cfg = cfg });
+        if (!app.opts.qa and (cfg.kind == .screen or cfg.kind == .window)) {
+            _ = live_video.eng.updateNativeCapture(cfg);
+        }
+        app.saveSettings();
     }
 
     // --- Ações da interface ------------------------------------------------
@@ -2388,6 +2425,10 @@ pub const App = struct {
             },
             .start_screen_share => |cfg| {
                 const ch = st.voice orelse return;
+                if (st.stream_on and cfg.transport == st.stream_cfg.transport and !app.store.demo and cfg.kind != .demo_4k and (st.stream_cfg.kind == .screen or st.stream_cfg.kind == .window)) {
+                    app.applyLiveStreamCfg(cfg);
+                    return;
+                }
                 st.stream_on = true;
                 st.stream_cfg = cfg;
                 st.settings.video_cursor = cfg.capture_cursor;
@@ -2403,8 +2444,13 @@ pub const App = struct {
                     app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = app.store.me, .watch = true } });
                 }
             },
+            .update_stream_cfg => |cfg| {
+                if (st.stream_on) app.applyLiveStreamCfg(cfg);
+            },
+            .toggle_stream_cams => st.stream_show_cams = !st.stream_show_cams,
             .stop_screen_share => {
                 st.stream_on = false;
+                st.stream_settings_open = false;
                 if (st.watch_owner == app.store.me) {
                     st.watch_owner = 0;
                     st.spotlight_fullscreen = false;
@@ -2536,6 +2582,25 @@ pub const App = struct {
                 // Tirar o silêncio volta para o volume de antes (core/volumes.zig).
                 st.volumes.setMuted(app.gpa, vm.user, vm.mute);
                 app.cmd(.{ .voice_volume = .{ .user = vm.user, .volume = st.volumes.gain(vm.user) } });
+                app.saveSettings();
+            },
+            .set_stream_volume => |vol| {
+                const clamped = std.math.clamp(vol, 0, 2);
+                const pct: u8 = @intFromFloat(@round(clamped * 100));
+                st.settings.stream_volume = pct;
+                if (clamped > 0.005) st.settings.stream_muted = false;
+                const eff: f32 = if (st.settings.stream_muted) 0 else clamped;
+                app.cmd(.{ .stream_volume = eff });
+                const ms = now();
+                if (ms - st.voice_save_ms > 2000) {
+                    st.voice_save_ms = ms;
+                    app.saveSettings();
+                }
+            },
+            .set_stream_mute => |mute| {
+                st.settings.stream_muted = mute;
+                const vol: f32 = @as(f32, @floatFromInt(@min(st.settings.stream_volume, 200))) / 100.0;
+                app.cmd(.{ .stream_volume = if (mute) 0 else vol });
                 app.saveSettings();
             },
             .set_voice_dsp => |vd| {
@@ -3554,7 +3619,7 @@ pub const App = struct {
             }
             // Com o mouse andando, a animação de destaque também espera o limite dele:
             // é o que mais pede quadro, e só volta ao ritmo da tela quando o mouse para.
-            const busy = pending > 0 or (anim.active and !mouse.wanted()) or app.opts.shot != null or (app.opts.qa and !app.qa_sleep) or bench or
+            const busy = pending > 0 or anim.active or app.opts.shot != null or (app.opts.qa and !app.qa_sleep) or bench or
                 (login_anim and !app.st.settings.reduce_motion) or app_flutuante.ocupada(app);
             // Mantém prévia local só quando a janela está visível, permitida pelo host e assistindo a si mesmo (economia 4K).
             live_video.eng.preview_wanted.store(!unseen and app.st.settings.video_self_preview and (app.st.watch_owner == app.store.me), .release);
@@ -3894,7 +3959,7 @@ pub const App = struct {
                         ncfg.kind = .screen;
                         ncfg.target_id = disps[chosen].id;
                         if (app.st.stream_on) app.st.stream_cfg = ncfg;
-                        _ = live_video.eng.startNativeCapture(ncfg);
+                        _ = live_video.eng.updateNativeCapture(ncfg);
                     }
                 }
             }

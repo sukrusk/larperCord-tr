@@ -217,6 +217,8 @@ pub const State = struct {
     cam_on: bool = false,
     stream_on: bool = false,
     stream_cfg: video_cfg.StreamConfig = .{},
+    stream_show_cams: bool = true,
+    stream_settings_open: bool = false,
     watch_owner: Id = 0,
     pending_watch_channel: Id = 0,
     pending_watch_owner: Id = 0,
@@ -275,6 +277,8 @@ pub const State = struct {
     uploads: std.ArrayList(Upload) = .empty,
     /// Contador de "geração" do tema (invalida caches de layout).
     theme_gen: u8 = 0,
+    theme_fade_ms: i64 = 0,
+    theme_fade_col: u32 = 0,
     nonce: u64 = 1,
     /// Último "digitando" enviado (o Discord pede no máximo um a cada 8 s).
     typing_sent_ms: i64 = 0,

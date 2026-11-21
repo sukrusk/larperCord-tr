@@ -421,11 +421,14 @@ pub const Command = union(enum) {
     voice_flags: struct { mute: bool, deaf: bool },
     /// Volume individual de quem está falando (0..2).
     voice_volume: struct { user: Id, volume: f32 },
+    /// Volume do áudio da transmissão (Go Live, 0..2).
+    stream_volume: f32,
     /// "Tirar ruído" e "Igualar volume" de uma pessoa (mixer da call).
     voice_dsp: struct { user: Id, denoise: bool, level: bool },
     start_video: video_cfg.StreamConfig,
     stop_video,
     start_stream: video_cfg.StreamConfig,
+    update_stream_cfg: video_cfg.StreamConfig,
     stop_stream,
     watch_stream: struct { channel: Id, guild: Id = 0, owner: Id, watch: bool },
     remote_ctrl_request: struct { peer: Id, perm: video_cfg.RemotePerm },
@@ -567,6 +570,9 @@ pub const Action = union(enum) {
     set_voice_volume: struct { user: Id, volume: f32 },
     /// "Silenciar para mim": não mexe no volume guardado (core/volumes.zig).
     set_voice_mute: struct { user: Id, mute: bool },
+    /// Volume e mudo do áudio da transmissão assistida (Go Live, 0..2).
+    set_stream_volume: f32,
+    set_stream_mute: bool,
     /// "Tirar ruído" e "Igualar volume" de uma pessoa, no mixer da call.
     set_voice_dsp: struct { user: Id, denoise: bool, level: bool },
     /// Abre/fecha o mixer de voz (a lista de quem está na call com volumes).
@@ -581,7 +587,9 @@ pub const Action = union(enum) {
     request_keyframe,
     open_stream_picker,
     start_screen_share: video_cfg.StreamConfig,
+    update_stream_cfg: video_cfg.StreamConfig,
     stop_screen_share,
+    toggle_stream_cams,
     watch_stream: Id,
     watch_member_stream: struct { channel: Id, owner: Id },
     request_remote_ctrl: struct { peer: Id, perm: video_cfg.RemotePerm },

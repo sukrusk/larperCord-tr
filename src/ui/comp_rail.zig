@@ -321,7 +321,11 @@ fn icon(ctx: *d.Ctx, dl: *c.ImDrawList, ref: ?GuildRef, cx: f32, y: f32, size: f
         d.rect(dl, .{ .x = cx - 12 * s, .y = cy - 9 * s, .w = 24 * s, .h = 17 * s }, ink, 8 * s);
         c.ImDrawList_AddTriangleFilled(dl, d.v(cx - 7 * s, cy + 6 * s), d.v(cx - 1 * s, cy + 6 * s), d.v(cx - 9 * s, cy + 13 * s), ink.u());
         for ([_]f32{ -6, 0, 6 }) |dx| d.circle(dl, cx + dx * s, cy - 0.5 * s, 2 * s, bg);
-        if (selected and ind == .left) d.rectFlags(dl, .{ .x = bar.x, .y = y + size / 2 - size * 0.42, .w = 4, .h = size * 0.83 }, ctx.col(.text), 4, c.ImDrawFlags_RoundRight);
+        const pill = anim.to(anim.id("dm-pill", n), if (selected) size * 0.83 else if (hb.hovered) size * 0.42 else 0, 18);
+        if (pill > 0.5) switch (ind) {
+            .left => d.rectFlags(dl, .{ .x = bar.x, .y = y + size / 2 - pill / 2, .w = 4, .h = pill }, ctx.col(.text), 4, c.ImDrawFlags_RoundRight),
+            .bottom => d.rectFlags(dl, .{ .x = cx - pill / 2, .y = bar.bottom() - 4, .w = pill, .h = 3 }, ctx.col(.accent), 3, c.ImDrawFlags_RoundTop),
+        };
         if (ind == .left) tooltip(ctx, n, ir.right() + 14, y + size / 2, i18n.tr("Mensagens diretas", "Direct Messages"), hb.hovered);
     }
 }

@@ -396,3 +396,16 @@ test "pacote de controle remoto vai e volta sem perda" {
     try t.expectEqual(p.seq, out.seq);
     try t.expect(RemoteInputPacket.decode(buf[0..5]) == null);
 }
+
+test "presets de transmissão e resolução devolvem valores esperados" {
+    try t.expectEqual(@as(u32, 2_200), Resolution.p720.defaultBitrateKbps(30));
+    try t.expectEqual(@as(u32, 3_500), Resolution.p720.defaultBitrateKbps(60));
+    try t.expectEqual(@as(u32, 4_000), Resolution.p1080.defaultBitrateKbps(30));
+    try t.expectEqual(@as(u32, 6_500), Resolution.p1080.defaultBitrateKbps(60));
+    try t.expectEqual(@as(u32, 11_000), Resolution.p2160.defaultBitrateKbps(60));
+    try t.expectEqual(PerfPreset.balanced, PerfPreset.fromByte(99));
+    try t.expect(PerfPreset.speed.qualityVsSpeed() < PerfPreset.balanced.qualityVsSpeed());
+    try t.expect(PerfPreset.balanced.qualityVsSpeed() < PerfPreset.quality.qualityVsSpeed());
+    try t.expectEqual(Resolution.p1440, camResolution(3, .p1440));
+    try t.expectEqual(Resolution.p480, camResolution(0, .p1440));
+}

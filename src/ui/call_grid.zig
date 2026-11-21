@@ -212,25 +212,36 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
         w.avatarAt(ctx, dl, guild, cx, cy, av, uid, look.shape, null, 1, .{ .animate = false, .request = photo_px });
     }
 
-    // O nome e, embaixo, a atividade, centrados (no seu quadro, acima do medidor).
     const name = ctx.store.nameIn(guild, uid) orelse "?";
-    const fs = std.math.clamp(r.h * 0.13, 13, 18);
     const nf = ctx.ui.get(.semibold);
-    const room = r.w - 24;
-    const nw = @min(d.width(nf, fs, name), room);
-    const ny = cy + av / 2 + @max(6, r.h * 0.05);
-    _ = d.textClipped(dl, nf, fs, cx - nw / 2, ny, ink.alpha(0.95), name, room);
-    w.markName(.{ .x = cx - nw / 2, .y = ny, .w = nw, .h = fs + 4 }, "tile", uid, name);
-    if (u) |x| if (x.activity) |act| if (act.len > 0) {
-        const afs = fs - 2.5;
-        const ay = ny + fs + 4;
-        if (ay + afs + (if (mine) @as(f32, 14) else 4) <= r.bottom()) {
-            const af = ctx.ui.get(.regular);
-            const aw = @min(d.width(af, afs, act), room);
-            _ = d.textClipped(dl, af, afs, cx - aw / 2, ay, ink.alpha(0.7), act, room);
-            qa.mark(.{ .x = cx - aw / 2, .y = ay, .w = aw, .h = afs + 4 }, "grid-activity:{d}", .{uid});
-        }
-    };
+    if (drew_cam) {
+        // Câmara ligada: badge discreta no canto inferior esquerdo (estilo Discord), sem texto no meio do rosto.
+        const max_bw = @max(r.w - 20, 40);
+        const pad_x: f32 = 8;
+        const bw = @min(d.width(nf, 12, name) + pad_x * 2, max_bw);
+        const pill: d.Rect = .{ .x = r.x + 8, .y = r.bottom() - 28, .w = bw, .h = 20 };
+        d.rect(dl, pill, d.Rgba.hex(0x0c0e14).alpha(0.78), 6);
+        _ = d.textClipped(dl, nf, 12, pill.x + pad_x, d.centerY(pill, 12), d.Rgba.white, name, bw - pad_x * 2);
+        w.markName(pill, "tile", uid, name);
+    } else {
+        // O nome e, embaixo, a atividade, centrados (no seu quadro, acima do medidor).
+        const fs = std.math.clamp(r.h * 0.13, 13, 18);
+        const room = r.w - 24;
+        const nw = @min(d.width(nf, fs, name), room);
+        const ny = cy + av / 2 + @max(6, r.h * 0.05);
+        _ = d.textClipped(dl, nf, fs, cx - nw / 2, ny, ink.alpha(0.95), name, room);
+        w.markName(.{ .x = cx - nw / 2, .y = ny, .w = nw, .h = fs + 4 }, "tile", uid, name);
+        if (u) |x| if (x.activity) |act| if (act.len > 0) {
+            const afs = fs - 2.5;
+            const ay = ny + fs + 4;
+            if (ay + afs + (if (mine) @as(f32, 14) else 4) <= r.bottom()) {
+                const af = ctx.ui.get(.regular);
+                const aw = @min(d.width(af, afs, act), room);
+                _ = d.textClipped(dl, af, afs, cx - aw / 2, ay, ink.alpha(0.7), act, room);
+                qa.mark(.{ .x = cx - aw / 2, .y = ay, .w = aw, .h = afs + 4 }, "grid-activity:{d}", .{uid});
+            }
+        };
+    }
 
     // Microfone e fone desligados, no canto de cima (longe do nome e da atividade;
     // vermelho: foi o servidor), numa pílula com o fundo do tema.
@@ -459,7 +470,9 @@ pub fn page(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) void 
     // Esc volta para a conversa, se não for para fechar outra coisa (menu, paleta,
     // Configurações, a imagem aberta, a busca) nem estiver digitando.
     if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and escFree(ctx)) {
-        if (ctx.st.spotlight_cam != 0) {
+        if (ctx.st.stream_settings_open) {
+            ctx.st.stream_settings_open = false;
+        } else if (ctx.st.spotlight_cam != 0) {
             ctx.st.spotlight_cam = 0;
             ctx.st.spotlight_fullscreen = false;
         } else if (ctx.st.watch_owner != 0) {
@@ -472,15 +485,23 @@ pub fn page(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) void 
     const tty = d.is(n, "variant", "irc", "");
     const cam_spot = ctx.st.spotlight_cam;
     if (ctx.st.watch_owner != 0 or cam_spot != 0) {
-        if (ctx.st.spotlight_fullscreen or r.h < 280) {
-            if (cam_spot != 0) stream_view.drawCam(ctx, r.inset(12, 8), cam_spot) else stream_view.draw(ctx, r.inset(12, 8));
-            return;
-        }
-        const stage_h = @round(@max(r.h * 0.68, r.h - 160));
+        const show_strip = !ctx.st.spotlight_fullscreen and r.h >= 280 and (ctx.st.stream_show_cams or ctx.st.watch_owner == 0);
+        const stage_h = if (show_strip) @round(std.math.clamp(r.h * 0.68, 160, r.h - 128)) else r.h;
         const stage_r: d.Rect = .{ .x = r.x + 12, .y = r.y + 8, .w = @max(r.w - 24, 60), .h = @max(stage_h - 12, 60) };
-        if (cam_spot != 0) stream_view.drawCam(ctx, stage_r, cam_spot) else stream_view.draw(ctx, stage_r);
-        const strip_r: d.Rect = .{ .x = r.x, .y = r.y + stage_h, .w = r.w, .h = @max(r.h - stage_h, 40) };
-        people(ctx, n, strip_r, cs, tty, "##call-grid");
+        if (ctx.st.watch_owner != 0 and cam_spot != 0 and stage_r.w >= 380) {
+            const gap: f32 = 8;
+            const lw = @round((stage_r.w - gap) * 0.66);
+            stream_view.draw(ctx, .{ .x = stage_r.x, .y = stage_r.y, .w = lw, .h = stage_r.h });
+            stream_view.drawCam(ctx, .{ .x = stage_r.x + lw + gap, .y = stage_r.y, .w = @max(stage_r.w - lw - gap, 80), .h = stage_r.h }, cam_spot);
+        } else if (cam_spot != 0) {
+            stream_view.drawCam(ctx, stage_r, cam_spot);
+        } else {
+            stream_view.draw(ctx, stage_r);
+        }
+        if (show_strip) {
+            const strip_r: d.Rect = .{ .x = r.x, .y = r.y + stage_h, .w = r.w, .h = @max(r.h - stage_h, 40) };
+            people(ctx, n, strip_r, cs, tty, "##call-grid");
+        }
         return;
     }
     people(ctx, n, r, cs, tty, "##call-grid");

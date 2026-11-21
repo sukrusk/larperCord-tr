@@ -987,6 +987,7 @@ pub const Gateway = struct {
                     sent.gain_milli.store(@intFromFloat(@round(std.math.clamp(v.volume, 0, 2) * 1000)), .release);
                     sent.gain_user.store(v.user, .release);
                 },
+                .stream_volume => {},
                 .voice_dsp => |v| {
                     sent.dsp_bits.store(@as(u64, @intFromBool(v.denoise)) | (@as(u64, @intFromBool(v.level)) << 1), .release);
                     sent.dsp_user.store(v.user, .release);
@@ -1029,6 +1030,25 @@ pub const Gateway = struct {
                         .has_audio = cfg.share_audio,
                         .remote_perm = cfg.remote_perm,
                     } });
+                },
+                .update_stream_cfg => |cfg| {
+                    if (g.voice_stream) {
+                        const ch = g.voice_channel orelse 0;
+                        const dims = cfg.resolution.dims();
+                        g.emit(.{ .stream_update = .{
+                            .channel = ch,
+                            .guild = guildOfChannel(ch),
+                            .owner = me_id,
+                            .active = true,
+                            .source = cfg.kind,
+                            .width = @intCast(dims[0]),
+                            .height = @intCast(dims[1]),
+                            .fps = cfg.fps,
+                            .codec = cfg.codec,
+                            .has_audio = cfg.share_audio,
+                            .remote_perm = cfg.remote_perm,
+                        } });
+                    }
                 },
                 .stop_stream => {
                     g.voice_stream = false;
