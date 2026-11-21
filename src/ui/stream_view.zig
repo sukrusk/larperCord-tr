@@ -18,9 +18,17 @@ var was_down_r: bool = false;
 var was_down_m: bool = false;
 var prev_keys: [232]bool = @splat(false);
 var last_rc_req_peer: u64 = 0;
+var zoom_fill: bool = false;
 
 pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
-    const owner = ctx.st.watch_owner;
+    drawTarget(ctx, r, ctx.st.watch_owner, false);
+}
+
+pub fn drawCam(ctx: *d.Ctx, r: d.Rect, owner: u64) void {
+    drawTarget(ctx, r, owner, true);
+}
+
+fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     if (owner == 0 or r.w < 40 or r.h < 40) return;
 
     const dl = ctx.dl;
@@ -28,51 +36,73 @@ pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
     const rad = @max(ctx.th.radius, 8);
     d.rect(dl, r, d.Rgba.hex(0x0c0e12), rad);
     d.border(dl, r, ctx.col(.border), rad, 1);
-    qa.mark(r, "stream-stage:{d}", .{owner});
+    if (is_cam) qa.mark(r, "cam-stage:{d}", .{owner}) else qa.mark(r, "stream-stage:{d}", .{owner});
 
-    const info = ctx.store.streamOf(owner);
-    const fps_target: u8 = if (info) |si| si.fps else 60;
+    const info = if (is_cam) null else ctx.store.streamOf(owner);
+    const fps_target: u8 = if (info) |si| si.fps else if (ctx.st.settings.video_fps == 1) 60 else 30;
     anim.every(if (fps_target >= 45) 16 else 33);
 
-    const view = live_video.eng.watch_slot.view(ctx.images.renderer);
+    const slot_opt: ?*live_video.FrameSlot = if (is_cam)
+        (if (owner == ctx.store.me) &live_video.eng.cam_slot else live_video.eng.peerCamSlot(owner))
+    else
+        &live_video.eng.watch_slot;
+    const view = if (slot_opt) |sp| sp.view(ctx.images.renderer) else null;
     var vid_r = r;
     if (view) |v| {
         const vw: f32 = @floatFromInt(v.w);
         const vh: f32 = @floatFromInt(v.h);
-        const scale = @min((r.w - 8) / vw, (r.h - 8) / vh);
+        const inner = r.inset(4, 4);
+        const scale = if (zoom_fill) @max(inner.w / vw, inner.h / vh) else @min(inner.w / vw, inner.h / vh);
         const dw = vw * scale;
         const dh = vh * scale;
         vid_r = .{
-            .x = r.x + (r.w - dw) / 2,
-            .y = r.y + (r.h - dh) / 2,
+            .x = inner.x + (inner.w - dw) / 2,
+            .y = inner.y + (inner.h - dh) / 2,
             .w = dw,
             .h = dh,
         };
+        const mirror = is_cam and owner == ctx.store.me and ctx.st.settings.video_cam_mirror;
+        const uv0 = if (mirror) d.v(1, 0) else d.v(0, 0);
+        const uv1 = if (mirror) d.v(0, 1) else d.v(1, 1);
+        if (zoom_fill) c.ImDrawList_PushClipRect(dl, d.v(inner.x, inner.y), d.v(inner.right(), inner.bottom()), true);
         c.ImDrawList_AddImageRounded(
             dl,
             v.ref,
             d.v(vid_r.x, vid_r.y),
             d.v(vid_r.right(), vid_r.bottom()),
-            d.v(0, 0),
-            d.v(1, 1),
+            uv0,
+            uv1,
             d.Rgba.white.u(),
             6,
             0,
         );
+        if (zoom_fill) c.ImDrawList_PopClipRect(dl);
     } else {
-        const wait_txt = i18n.tr("Aguardando quadro 4K NV12…", "Waiting for 4K NV12 frame…");
+        const wait_txt = if (is_cam)
+            i18n.tr("Aguardando vídeo da câmera…", "Waiting for camera video…")
+        else if (owner == ctx.store.me)
+            i18n.tr("Iniciando captura NV12…", "Starting NV12 capture…")
+        else
+            i18n.tr("Aguardando quadro 4K NV12… (use Kare İste se demorar)", "Waiting for 4K NV12 frame… (click Keyframe if stuck)");
         const tw = d.width(fam.get(.medium), 14, wait_txt);
         d.text(dl, fam.get(.medium), 14, r.x + (r.w - tw) / 2, d.centerY(r, 14), ctx.col(.muted), wait_txt);
     }
 
     // HUD superior esquerdo: nome, resolução real, FPS, codec e RAM NV12.
     const name = ctx.store.nameIn(ctx.st.guild, owner) orelse "?";
-    var hud_b: [160]u8 = undefined;
+    var hud_b: [180]u8 = undefined;
+    const kind_tag: []const u8 = if (is_cam)
+        "CAM"
+    else if (owner == ctx.store.me)
+        (if (ctx.st.stream_cfg.share_audio) "LIVE + AUDIO" else "LIVE")
+    else
+        "RX";
     const hud = if (view) |v| blk: {
         const fps_f = @as(f32, @floatFromInt(@max(v.fps_x10, 1))) / 10.0;
         const ram_mb = @as(f64, @floatFromInt(v.ram_bytes)) / (1024.0 * 1024.0);
-        break :blk std.fmt.bufPrint(&hud_b, "{s}  •  {d}x{d}  •  {d:.1} fps  •  {s}  •  NV12 {d:.1} MiB", .{
+        break :blk std.fmt.bufPrint(&hud_b, "{s} [{s}]  •  {d}x{d}  •  {d:.1} fps  •  {s}  •  NV12 {d:.1} MiB", .{
             name,
+            kind_tag,
             v.w,
             v.h,
             fps_f,
@@ -80,12 +110,12 @@ pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
             ram_mb,
         }) catch name;
     } else name;
-    const hud_w = @min(d.width(fam.get(.semibold), 12, hud) + 20, r.w * 0.6);
+    const hud_w = @min(d.width(fam.get(.semibold), 12, hud) + 20, r.w * 0.56);
     const hr: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = hud_w, .h = 26 };
     d.rect(dl, hr, d.Rgba.hex(0x0a0c10).alpha(0.8), 6);
     _ = d.textClipped(dl, fam.get(.semibold), 12, hr.x + 10, d.centerY(hr, 12), d.Rgba.white, hud, hr.w - 16);
 
-    // HUD superior direito: Controle remoto / Tela cheia / Fechar.
+    // HUD superior direito: Fechar / Tela cheia / Zoom / Keyframe / Fonte / Controle remoto.
     var bx = r.right() - 10;
     const bh: f32 = 28;
     const by = r.y + 10;
@@ -98,7 +128,14 @@ pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
     d.rect(dl, xr, (if (xh.hovered) ctx.col(.danger) else d.Rgba.hex(0x14161c).alpha(0.82)), 6);
     d.line(dl, xr.x + 9, xr.y + 9, xr.right() - 9, xr.bottom() - 9, d.Rgba.white, 1.8);
     d.line(dl, xr.right() - 9, xr.y + 9, xr.x + 9, xr.bottom() - 9, d.Rgba.white, 1.8);
-    if (xh.clicked) ctx.act(.{ .watch_stream = 0 });
+    if (xh.clicked) {
+        if (is_cam) {
+            ctx.st.spotlight_cam = 0;
+            ctx.st.spotlight_fullscreen = false;
+        } else {
+            ctx.act(.{ .watch_stream = 0 });
+        }
+    }
 
     // Botão tela cheia.
     bx -= bh + 6;
@@ -109,9 +146,51 @@ pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
     icons.fullscreen(dl, fr.x + fr.w / 2, fr.y + fr.h / 2, d.Rgba.white.u());
     if (fh.clicked) ctx.st.spotlight_fullscreen = !ctx.st.spotlight_fullscreen;
 
-    // Botão Pedir/Parar Controle Remoto (quando assistindo outra pessoa).
-    var ctrl_hovered = xh.hovered or fh.hovered;
+    // Sığdır / Doldur (Zoom).
+    const z_lbl = if (zoom_fill) i18n.tr("Sığdır", "Fit") else i18n.tr("Doldur", "Fill");
+    const zw = d.width(fam.get(.semibold), 12, z_lbl) + 18;
+    bx -= zw + 6;
+    const zr: d.Rect = .{ .x = bx, .y = by, .w = zw, .h = bh };
+    const zh = d.hit(ctx, 0x9204, zr);
+    d.rect(dl, zr, (if (zoom_fill) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.82)).mix(d.Rgba.white, if (zh.hovered) 0.14 else 0), 6);
+    d.text(dl, fam.get(.semibold), 12, zr.x + 9, d.centerY(zr, 12), d.Rgba.white, z_lbl);
+    if (zh.clicked) zoom_fill = !zoom_fill;
+
+    var ctrl_hovered = xh.hovered or fh.hovered or zh.hovered;
     if (owner != ctx.store.me) {
+        const kf_lbl = i18n.tr("Kare İste", "Keyframe");
+        const kfw = d.width(fam.get(.semibold), 12, kf_lbl) + 18;
+        bx -= kfw + 6;
+        const kfr: d.Rect = .{ .x = bx, .y = by, .w = kfw, .h = bh };
+        const kfh = d.hit(ctx, 0x9205, kfr);
+        ctrl_hovered = ctrl_hovered or kfh.hovered;
+        d.rect(dl, kfr, d.Rgba.hex(0x14161c).alpha(0.82).mix(d.Rgba.white, if (kfh.hovered) 0.14 else 0), 6);
+        d.text(dl, fam.get(.semibold), 12, kfr.x + 9, d.centerY(kfr, 12), d.Rgba.white, kf_lbl);
+        if (kfh.clicked) ctx.act(.request_keyframe);
+    } else if (!is_cam and ctx.st.stream_on) {
+        const stop_lbl = i18n.tr("Durdur", "Stop");
+        const sw = d.width(fam.get(.semibold), 12, stop_lbl) + 18;
+        bx -= sw + 6;
+        const sr: d.Rect = .{ .x = bx, .y = by, .w = sw, .h = bh };
+        const sh = d.hit(ctx, 0x9207, sr);
+        ctrl_hovered = ctrl_hovered or sh.hovered;
+        d.rect(dl, sr, ctx.col(.danger).mix(d.Rgba.white, if (sh.hovered) 0.14 else 0), 6);
+        d.text(dl, fam.get(.semibold), 12, sr.x + 9, d.centerY(sr, 12), d.Rgba.white, stop_lbl);
+        if (sh.clicked) ctx.act(.stop_screen_share);
+
+        const chg_lbl = i18n.tr("Kaynak Değiştir", "Switch source");
+        const cw = d.width(fam.get(.semibold), 12, chg_lbl) + 18;
+        bx -= cw + 6;
+        const cr: d.Rect = .{ .x = bx, .y = by, .w = cw, .h = bh };
+        const ch = d.hit(ctx, 0x9206, cr);
+        ctrl_hovered = ctrl_hovered or ch.hovered;
+        d.rect(dl, cr, d.Rgba.hex(0x14161c).alpha(0.82).mix(d.Rgba.white, if (ch.hovered) 0.14 else 0), 6);
+        d.text(dl, fam.get(.semibold), 12, cr.x + 9, d.centerY(cr, 12), d.Rgba.white, chg_lbl);
+        if (ch.clicked) ctx.act(.open_stream_picker);
+    }
+
+    // Botão Pedir/Parar Controle Remoto (quando assistindo outra pessoa).
+    if (!is_cam and owner != ctx.store.me) {
         const viewer_active = ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner;
         const rc_lbl = if (viewer_active)
             i18n.tr("Parar controle (F8)", "Stop control (F8)")
@@ -139,7 +218,7 @@ pub fn draw(ctx: *d.Ctx, r: d.Rect) void {
     }
 
     // Captura de entrada remota quando o controle estilo AnyDesk estiver ativo no espectador.
-    if (ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner and view != null and !ctrl_hovered and ctx.st.popup == .none) {
+    if (!is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner and view != null and !ctrl_hovered and ctx.st.popup == .none) {
         const v = view.?;
         if (video_cfg.mapViewportToNormalized(ctx.mouse.x, ctx.mouse.y, vid_r.x, vid_r.y, vid_r.w, vid_r.h, v.w, v.h)) |norm| {
             const moved = last_norm == null or last_norm.?[0] != norm[0] or last_norm.?[1] != norm[1];
@@ -221,7 +300,7 @@ pub fn resetRemoteInput() void {
 /// mesmo em tela cheia sobre o painel lateral ou lista de mensagens.
 pub fn modalStage(ctx: *d.Ctx) void {
     const st = ctx.st;
-    if (st.watch_owner == 0 or st.call_view or st.voice == null) return;
+    if ((st.watch_owner == 0 and st.spotlight_cam == 0) or st.call_view or st.voice == null) return;
 
     const margin: f32 = if (st.spotlight_fullscreen) 8 else 48;
     const wr: d.Rect = .{
@@ -249,10 +328,15 @@ pub fn modalStage(ctx: *d.Ctx) void {
     const prev = ctx.dl;
     ctx.dl = c.ImGui_GetWindowDrawList();
     defer ctx.dl = prev;
-    draw(ctx, wr);
+    if (st.spotlight_cam != 0) drawCam(ctx, wr, st.spotlight_cam) else draw(ctx, wr);
 
     if (!modal_above and !@import("dropdown.zig").ownsEsc() and c.ImGui_IsKeyPressed(c.ImGuiKey_Escape)) {
-        ctx.act(.{ .watch_stream = 0 });
+        if (st.spotlight_cam != 0) {
+            ctx.st.spotlight_cam = 0;
+            ctx.st.spotlight_fullscreen = false;
+        } else {
+            ctx.act(.{ .watch_stream = 0 });
+        }
     }
 }
 

@@ -30,6 +30,11 @@ pub const Duplicator = struct {
         return null;
     }
 
+    pub fn repeatNv12(self: *Duplicator, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
+        _ = .{ self, want_cpu_copy, pts_us };
+        return null;
+    }
+
     pub fn deinit(self: *Duplicator) void {
         _ = self;
     }
@@ -62,7 +67,10 @@ pub const HwEncoder = struct {
     force_cpu_buf: bool = true,
     last_hr: i32 = 0,
     pub fn open(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque) !HwEncoder {
-        _ = .{ codec, w, h, fps, bitrate_kbps, d3d11_dev };
+        return openPref(codec, w, h, fps, bitrate_kbps, d3d11_dev, true);
+    }
+    pub fn openPref(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwEncoder {
+        _ = .{ codec, w, h, fps, bitrate_kbps, d3d11_dev, hw_preferred };
         return error.NotImplementedOnLinuxYet;
     }
     pub fn requestKeyframe(self: *HwEncoder) void {
@@ -88,7 +96,10 @@ pub const HwDecoder = struct {
     hw: bool = false,
     last_hr: i32 = 0,
     pub fn open(codec: video_cfg.Codec, w: u16, h: u16, d3d11_dev: ?*anyopaque) !HwDecoder {
-        _ = .{ codec, w, h, d3d11_dev };
+        return openPref(codec, w, h, d3d11_dev, true);
+    }
+    pub fn openPref(codec: video_cfg.Codec, w: u16, h: u16, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwDecoder {
+        _ = .{ codec, w, h, d3d11_dev, hw_preferred };
         return error.NotImplementedOnLinuxYet;
     }
     pub fn decode(self: *HwDecoder, au: []const u8, pts_us: i64) !?media_if.CaptureFrame {

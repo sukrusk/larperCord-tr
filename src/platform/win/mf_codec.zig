@@ -337,14 +337,20 @@ pub const HwEncoder = struct {
     pps_len: usize = 0,
 
     pub fn open(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque) !HwEncoder {
+        return openPref(codec, w, h, fps, bitrate_kbps, d3d11_dev, true);
+    }
+
+    pub fn openPref(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwEncoder {
+        if (!hw_preferred) {
+            if (openImpl(codec, w, h, fps, bitrate_kbps, null, false)) |sw_enc| {
+                return sw_enc;
+            } else |_| {}
+        }
         if (openImpl(codec, w, h, fps, bitrate_kbps, d3d11_dev, true)) |hw_enc| {
             return hw_enc;
         } else |err| {
-            // Câmera / ambientes sem encoder DXVA-MFT disponível caem automaticamente para MFT SW H.264.
-            if (d3d11_dev == null) {
-                return openImpl(codec, w, h, fps, bitrate_kbps, null, false) catch return err;
-            }
-            return err;
+            // Se o encoder hardware falhar (ou com D3D11), cai para MFT em software CPU/NV12.
+            return openImpl(codec, w, h, fps, bitrate_kbps, null, false) catch return err;
         }
     }
 
@@ -524,9 +530,9 @@ pub const HwEncoder = struct {
         if (self.async.active()) {
             self.async.pump(0, false, false);
             if (self.async.need_input == 0) {
-                self.async.pump(12, true, false);
+                self.async.pump(6, true, false);
                 if (self.async.need_input == 0) {
-                    return self.readOutput(frame.pts_us, 0);
+                    return self.readOutput(frame.pts_us, 2);
                 }
             }
         }
@@ -547,7 +553,7 @@ pub const HwEncoder = struct {
         }
         if (self.async.active()) self.async.need_input -|= 1;
 
-        return self.readOutput(frame.pts_us, 16);
+        return self.readOutput(frame.pts_us, 8);
     }
 
     pub fn pollOutput(self: *HwEncoder, pts_us: i64) ?media_if.EncodedPacket {
@@ -783,26 +789,36 @@ pub const HwDecoder = struct {
     pps_len: usize = 0,
 
     pub fn open(codec: video_cfg.Codec, w_hint: u16, h_hint: u16, d3d11_dev: ?*anyopaque) !HwDecoder {
+        return openPref(codec, w_hint, h_hint, d3d11_dev, true);
+    }
+
+    fn openWithOwnD3d11(codec: video_cfg.Codec, w_hint: u16, h_hint: u16) ?HwDecoder {
+        var own = DecoderD3d11.create() orelse return null;
+        if (openImpl(codec, w_hint, h_hint, own.dev, true)) |self_in| {
+            var self = self_in;
+            self.owned_d3d11_dll = own.dll;
+            self.owned_d3d11_dev = own.dev;
+            self.owned_d3d11_ctx = own.ctx;
+            return self;
+        } else |_| {
+            own.close();
+            return null;
+        }
+    }
+
+    pub fn openPref(codec: video_cfg.Codec, w_hint: u16, h_hint: u16, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwDecoder {
         if (d3d11_dev) |dev| {
-            return openImpl(codec, w_hint, h_hint, dev, true);
+            return openImpl(codec, w_hint, h_hint, dev, hw_preferred);
         }
-        if (openImpl(codec, w_hint, h_hint, null, false)) |sw_dec| {
-            return sw_dec;
-        } else |err| {
-            if (DecoderD3d11.create()) |own_in| {
-                var own = own_in;
-                if (openImpl(codec, w_hint, h_hint, own.dev, true)) |self_in| {
-                    var self = self_in;
-                    self.owned_d3d11_dll = own.dll;
-                    self.owned_d3d11_dev = own.dev;
-                    self.owned_d3d11_ctx = own.ctx;
-                    return self;
-                } else |_| {
-                    own.close();
-                }
-            }
+        // Em 720p/1080p H.264 sem textura D3D11 zero-copy o decoder CPU é ~10x mais rápido (0.8-1.8ms/quadro vs readback DXVA);
+        // para HEVC/AV1/4K com hw_preferred, tenta DXVA primeiro.
+        const eff: video_cfg.Codec = if (codec == .auto) .h264 else codec;
+        const try_dxva_first = hw_preferred and (eff != .h264 or w_hint > 1920 or h_hint > 1080);
+        if (try_dxva_first) if (openWithOwnD3d11(codec, w_hint, h_hint)) |hw_dec| return hw_dec;
+        return openImpl(codec, w_hint, h_hint, null, false) catch |err| {
+            if (hw_preferred and !try_dxva_first) if (openWithOwnD3d11(codec, w_hint, h_hint)) |hw_dec| return hw_dec;
             return err;
-        }
+        };
     }
 
     fn openImpl(codec: video_cfg.Codec, w_hint: u16, h_hint: u16, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwDecoder {

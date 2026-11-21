@@ -33,6 +33,7 @@ const i18n = @import("../ui/i18n.zig");
 const image_uri = @import("../core/image_uri.zig");
 const media_url = @import("media_url.zig");
 const proxy = @import("proxy.zig");
+const dpi = @import("dpi_bypass.zig");
 const challenge = @import("challenge.zig");
 const settings_proto = @import("settings_proto.zig");
 const status_proto = @import("status_proto.zig");
@@ -97,6 +98,7 @@ pub const Gateway = struct {
     token: [:0]u8,
     thread: ?*c.SDL_Thread = null,
     ws: ?*c.CURL = null,
+    ws_resolve: dpi.ResolveGuard = .{},
     rest: ?*c.CURL = null,
     seq: ?i64 = null,
     hb_interval: i64 = 41250,
@@ -339,8 +341,11 @@ pub const Gateway = struct {
             const result = g.session();
             g.ws_live = false;
             if (g.ws) |h| {
+                g.ws_resolve.detach(h);
                 c.curl_easy_cleanup(h);
                 g.ws = null;
+            } else {
+                g.ws_resolve.detach(null);
             }
             if (g.stopping) break;
             const lived: ?i64 = if (g.ws_ready) nowMs() - g.ws_ready_ms else null;
@@ -566,6 +571,8 @@ pub const Gateway = struct {
             _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, "https,wss");
             _ = c.curl_easy_setopt(h, c.CURLOPT_REDIR_PROTOCOLS_STR, "https,wss");
             const via_proxy = useProxy(h);
+            g.ws_resolve.detach(h);
+            g.ws_resolve = dpi.ResolveGuard.attach(h, url, via_proxy);
             g.abortable(h);
             const rc = c.curl_easy_perform(h);
             if (rc != c.CURLE_OK) {
@@ -3509,7 +3516,9 @@ pub const Gateway = struct {
             _ = c.curl_easy_setopt(h, c.CURLOPT_HTTPHEADER, headers);
             _ = c.curl_easy_setopt(h, c.CURLOPT_USERAGENT, web_user_agent.ptr);
             _ = c.curl_easy_setopt(h, c.CURLOPT_CUSTOMREQUEST, method.ptr);
-            _ = useProxy(h);
+            const rest_via_proxy = useProxy(h);
+            var rest_resolve = dpi.ResolveGuard.attach(h, url, rest_via_proxy);
+            defer rest_resolve.detach(h);
             _ = c.curl_easy_setopt(h, c.CURLOPT_WRITEFUNCTION, writeCb);
             _ = c.curl_easy_setopt(h, c.CURLOPT_WRITEDATA, &resp.body);
             _ = c.curl_easy_setopt(h, c.CURLOPT_HEADERFUNCTION, headerCb);

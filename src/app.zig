@@ -89,6 +89,8 @@ const live_video = @import("ui/live_video.zig");
 const video_cfg = @import("core/video_cfg.zig");
 const voice_mod = @import("net/voice.zig");
 const remote_ctrl = @import("net/remote_ctrl.zig");
+const dpi_bypass = @import("net/dpi_bypass.zig");
+const goodbyedpi = @import("net/goodbyedpi.zig");
 const stream_view = @import("ui/stream_view.zig");
 const Debounce = @import("core/debounce.zig").Debounce;
 
@@ -401,6 +403,13 @@ pub const App = struct {
         }
         // Antes da rede: a primeira conexão com um token salvo já vai pelo proxy, e um
         // vídeo que toque antes do primeiro quadro já acha a pasta do FFmpeg.
+        dpi_bypass.qa_no_network = opts.qa;
+        goodbyedpi.qa_no_network = opts.qa;
+        dpi_bypass.setConfig(app.st.settings.dpi_doh, app.st.settings.dpi_split);
+        voice_mod.hw_decode_pref.store(app.st.settings.video_hw, .release);
+        if (!opts.qa and !opts.demo and opts.shot == null and app.st.settings.goodbyedpi_auto and goodbyedpi.supported() and goodbyedpi.isInstalled() and !goodbyedpi.isRunning(now())) {
+            _ = goodbyedpi.startProcess(app.st.settings.goodbyedpi_preset);
+        }
         proxy.set(app.st.settings.proxy.slice(), app.st.settings.proxy_all);
         ffmpeg.setDir(app.st.settings.ffmpeg_dir.slice());
         // O mudo da última vez continua ao entrar numa call.
@@ -1214,6 +1223,30 @@ pub const App = struct {
         };
     }
 
+    fn openConfiguredCamera(app: *App) void {
+        const st = &app.st;
+        const s = &st.settings;
+        const res = video_cfg.Resolution.fromByte(s.video_res);
+        const fps: u8 = if (s.video_fps == 1) 60 else 30;
+        const cam_kbps: u32 = if (s.video_bitrate_mbps > 0) std.math.clamp(@as(u32, s.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
+        live_video.eng.configureCamera(cam_kbps, s.video_hw, false);
+        const ok = live_video.eng.startCamera(s.video_cam_idx, res, fps, app.store.demo);
+        if (ok) {
+            st.cam_on = true;
+            app.cmd(.{ .start_video = .{
+                .kind = .camera,
+                .resolution = if (live_video.eng.cam_synthetic) res else live_video.eng.cam_res,
+                .fps = live_video.eng.cam_fps,
+                .codec = video_cfg.Codec.fromByte(s.video_codec),
+                .bitrate_kbps = cam_kbps,
+                .hw_accel = s.video_hw,
+            } });
+        } else {
+            st.cam_on = false;
+            st.showToast(now(), true, "nenhuma câmera aberta (verifique a permissão)", "no camera opened (check permission)", .{});
+        }
+    }
+
     /// O que só vale durante uma call (entrou, saiu, trocou de conta).
     pub fn resetCallState(app: *App) void {
         // Saindo da call (ou trocando de call) com a tela dela aberta: volta para o que
@@ -1226,6 +1259,7 @@ pub const App = struct {
         app.st.cam_on = false;
         app.st.stream_on = false;
         app.st.watch_owner = 0;
+        app.st.spotlight_cam = 0;
         app.st.spotlight_fullscreen = false;
         app.st.remote_ctrl_peer = 0;
         app.st.remote_ctrl_status = .idle;
@@ -2307,25 +2341,21 @@ pub const App = struct {
                 if (st.voice == null) return;
                 if (st.cam_on) {
                     st.cam_on = false;
+                    if (st.spotlight_cam == app.store.me) st.spotlight_cam = 0;
                     live_video.eng.stopCamera();
                     app.cmd(.stop_video);
                 } else {
-                    const res = video_cfg.Resolution.fromByte(st.settings.video_res);
-                    const fps: u8 = if (st.settings.video_fps == 1) 60 else 30;
-                    const ok = live_video.eng.startCamera(st.settings.video_cam_idx, res, fps, app.store.demo);
-                    if (ok) {
-                        st.cam_on = true;
-                        app.cmd(.{ .start_video = .{
-                            .kind = .camera,
-                            .resolution = if (live_video.eng.cam_synthetic) res else live_video.eng.cam_res,
-                            .fps = live_video.eng.cam_fps,
-                            .codec = video_cfg.Codec.fromByte(st.settings.video_codec),
-                            .hw_accel = st.settings.video_hw,
-                        } });
-                    } else {
-                        st.showToast(now(), true, "nenhuma câmera aberta (verifique a permissão)", "no camera opened (check permission)", .{});
-                    }
+                    app.openConfiguredCamera();
                 }
+            },
+            .switch_camera => |idx| {
+                st.settings.video_cam_idx = idx;
+                app.saveSettings();
+                if (st.voice != null and st.cam_on) app.openConfiguredCamera();
+            },
+            .request_keyframe => {
+                voice_mod.requestRemoteKeyframes();
+                st.showToast(now(), false, "novo keyframe solicitado", "requested fresh keyframe", .{});
             },
             .open_stream_picker => {
                 if (st.voice == null) return;
@@ -2335,13 +2365,15 @@ pub const App = struct {
                 const ch = st.voice orelse return;
                 st.stream_on = true;
                 st.stream_cfg = cfg;
+                st.settings.video_cursor = cfg.capture_cursor;
+                st.settings.video_self_preview = cfg.preview_self;
                 app.cmd(.{ .start_stream = cfg });
                 if (!app.opts.qa and (cfg.kind == .screen or cfg.kind == .window)) {
                     if (live_video.eng.startNativeCapture(cfg)) {
-                        st.watch_owner = app.store.me;
+                        st.watch_owner = if (cfg.preview_self) app.store.me else 0;
                     }
                 } else if (app.store.demo or cfg.kind == .demo_4k) {
-                    st.watch_owner = app.store.me;
+                    st.watch_owner = if (cfg.preview_self) app.store.me else 0;
                     live_video.eng.startDemoWatch(cfg);
                     app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = app.store.me, .watch = true } });
                 }
@@ -2379,7 +2411,8 @@ pub const App = struct {
                         app.cmd(.{ .watch_stream = .{ .channel = ch, .guild = st.voice_guild, .owner = old_owner, .watch = false } });
                     }
                     st.watch_owner = owner;
-                    live_video.eng.preview_wanted.store(owner == app.store.me, .release);
+                    if (owner == app.store.me) st.settings.video_self_preview = true;
+                    live_video.eng.preview_wanted.store(owner == app.store.me and st.settings.video_self_preview, .release);
                     live_video.eng.watch_slot.clear();
                     if (owner == app.store.me and st.stream_on and !app.store.demo) return;
                     const si = app.store.streamOf(owner);
@@ -3453,8 +3486,8 @@ pub const App = struct {
             // é o que mais pede quadro, e só volta ao ritmo da tela quando o mouse para.
             const busy = pending > 0 or (anim.active and !mouse.wanted()) or app.opts.shot != null or (app.opts.qa and !app.qa_sleep) or bench or
                 (login_anim and !app.st.settings.reduce_motion) or app_flutuante.ocupada(app);
-            // Mantém prévia local só quando a janela está visível e assistindo a si mesmo (economia 4K).
-            live_video.eng.preview_wanted.store(!unseen and (app.st.watch_owner == app.store.me), .release);
+            // Mantém prévia local só quando a janela está visível, permitida pelo host e assistindo a si mesmo (economia 4K).
+            live_video.eng.preview_wanted.store(!unseen and app.st.settings.video_self_preview and (app.st.watch_owner == app.store.me), .release);
             // Mantém simulação de câmera em demo/sem webcam física fluida mesmo fora da grade.
             if (live_video.eng.cam_synthetic and !app.opts.qa) {
                 anim.every(if (live_video.eng.cam_fps >= 45) 16 else 33);
@@ -3841,6 +3874,10 @@ pub const App = struct {
             }
             anim.instant = set.reduce_motion;
             @import("net/media_url.zig").allow_gif_hosts.store(set.gif_hosts, .release);
+            dpi_bypass.setConfig(set.dpi_doh, set.dpi_split);
+            voice_mod.hw_decode_pref.store(set.video_hw, .release);
+            const cam_kbps: u32 = if (set.video_bitrate_mbps > 0) std.math.clamp(@as(u32, set.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
+            live_video.eng.configureCamera(cam_kbps, set.video_hw, !app.st.cam_on);
             proxy.set(set.proxy.slice(), set.proxy_all);
             // Proxy novo (o da tela de entrada): o erro de rede era da tentativa sem ele.
             if (proxy.generation() != app.proxy_gen) {
@@ -3854,6 +3891,7 @@ pub const App = struct {
             app_presenca.frame(app);
             app.askChannelInfo();
             voz_audio.setPageOpen(set.open and set.page == .voz and app.store.ready);
+            settings_voz.stopPreviewIfClosed(set.open, set.page == .voz, app.st.cam_on);
             plugin_host.frame(app);
             @import("ui/attachments.zig").hide_embeds = !set.show_embeds;
             app.store.keep_log = set.message_log;

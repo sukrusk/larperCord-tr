@@ -143,6 +143,8 @@ test {
     _ = @import("plugins/panel.zig");
     _ = @import("plugins/rewrite.zig");
     _ = @import("plugins/json.zig");
+    _ = @import("net/dpi_bypass.zig");
+    _ = @import("net/goodbyedpi.zig");
 }
 
 // Exportar uma conversa não pede nada ao Discord (a conta de quem usa já foi

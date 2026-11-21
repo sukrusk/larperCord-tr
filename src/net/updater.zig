@@ -10,6 +10,7 @@ const version = @import("../core/version.zig");
 const at = @import("../core/atualizacao.zig");
 const sys = @import("../platform/sys.zig");
 const proxy = @import("proxy.zig");
+const dpi = @import("dpi_bypass.zig");
 
 const alloc = std.heap.c_allocator;
 
@@ -163,6 +164,8 @@ pub fn wakeUi() void {
 }
 
 pub fn fetch(url: [:0]const u8, out: *std.ArrayList(u8), max: usize, progress: ?*std.atomic.Value(usize)) !void {
+    var rg: dpi.ResolveGuard = .{};
+    defer rg.deinit();
     const h = c.curl_easy_init() orelse return error.Network;
     defer c.curl_easy_cleanup(h);
     var sink: Sink = .{ .out = out, .max = max, .progress = progress };
@@ -182,7 +185,10 @@ pub fn fetch(url: [:0]const u8, out: *std.ArrayList(u8), max: usize, progress: ?
     _ = c.curl_easy_setopt(h, c.CURLOPT_WRITEDATA, &sink);
     sys.curlTls(h);
     var pb: proxy.Buf = undefined;
-    if (proxy.forUrl(&pb, url)) |p| _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+    const px = proxy.forUrl(&pb, url);
+    if (px) |p| _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+    rg = dpi.ResolveGuard.attach(h, url, px != null);
+    defer rg.detach(h);
     if (c.curl_easy_perform(h) != c.CURLE_OK) return error.Network;
     var code: c_long = 0;
     _ = c.curl_easy_getinfo(h, c.CURLINFO_RESPONSE_CODE, &code);

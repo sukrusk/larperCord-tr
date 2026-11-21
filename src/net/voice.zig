@@ -41,6 +41,15 @@ const video_cfg = @import("../core/video_cfg.zig");
 const video_rtp = @import("../core/video_rtp.zig");
 const capture_backend = @import("../platform/capture_backend.zig");
 const video_diag = @import("../platform/video_diag.zig");
+const proxy = @import("proxy.zig");
+const dpi = @import("dpi_bypass.zig");
+
+pub var hw_decode_pref: std.atomic.Value(bool) = .init(true);
+pub var pli_epoch: std.atomic.Value(u32) = .init(0);
+
+pub fn requestRemoteKeyframes() void {
+    _ = pli_epoch.fetchAdd(1, .acq_rel);
+}
 
 const Id = types.Id;
 const alloc = std.heap.c_allocator;
@@ -564,7 +573,9 @@ const End = enum { stop, fatal, moved, resume_ws };
 const Worker = struct {
     v: *Voice,
     ws: ?*c.CURL = null,
+    ws_resolve: dpi.ResolveGuard = .{},
     ws_sock: sys.Socket = sys.no_socket,
+    last_pli_epoch: u32 = 0,
     udp: sys.Socket = sys.no_socket,
     server: sys.SockAddrIn = undefined,
     ssrc: u32 = 0,
@@ -761,6 +772,13 @@ const Worker = struct {
         defer if (hs_headers) |list| c.curl_slist_free_all(list);
         if (hs_headers) |list| _ = c.curl_easy_setopt(h, c.CURLOPT_HTTPHEADER, list);
         _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, "https,wss");
+        var pb: proxy.Buf = undefined;
+        const via_proxy = if (proxy.forDiscord(&pb)) |p| blk: {
+            _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+            break :blk true;
+        } else false;
+        w.ws_resolve.detach(h);
+        w.ws_resolve = dpi.ResolveGuard.attach(h, url, via_proxy);
         const rc = c.curl_easy_perform(h);
         if (rc != c.CURLE_OK) {
             std.log.warn("voz: curl {d}: {s}", .{ rc, c.curl_easy_strerror(rc) });
@@ -779,7 +797,12 @@ const Worker = struct {
     }
 
     fn closeWs(w: *Worker) void {
-        if (w.ws) |h| c.curl_easy_cleanup(h);
+        if (w.ws) |h| {
+            w.ws_resolve.detach(h);
+            c.curl_easy_cleanup(h);
+        } else {
+            w.ws_resolve.detach(null);
+        }
         w.ws = null;
         w.ws_sock = sys.no_socket;
         w.ws_in.clearRetainingCapacity();
@@ -909,6 +932,16 @@ const Worker = struct {
             if (debugOn()) w.watchQueues();
         }
         w.syncVideoOp12();
+        const req_ep = pli_epoch.load(.acquire);
+        if (w.last_pli_epoch != req_ep) {
+            w.last_pli_epoch = req_ep;
+            for (&w.video_rx) |*rx| {
+                if (rx.active and rx.ssrc != 0) {
+                    w.sendVideoPli(rx.ssrc);
+                    w.sendMediaSinkWants(rx.ssrc);
+                }
+            }
+        }
         w.pumpVideoTx();
         if (now >= w.next_rtcp_sr_ms) {
             w.next_rtcp_sr_ms = now + 5000;
@@ -1530,12 +1563,12 @@ const Worker = struct {
 
     fn ensureVideoTxQueues(w: *Worker) bool {
         if (w.tx_rtp_cache.len == 0) {
-            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 256) catch return false;
+            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 512) catch return false;
             @memset(mem, .{});
             w.tx_rtp_cache = mem;
         }
         if (w.rtp_out_ring.len == 0) {
-            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 256) catch return false;
+            const mem = std.heap.page_allocator.alloc(RtpPktSlot, 512) catch return false;
             @memset(mem, .{});
             w.rtp_out_ring = mem;
         }
@@ -1562,7 +1595,7 @@ const Worker = struct {
 
         // Retira quadros da fila apenas enquanto o pacer de pacotes UDP tiver espaço, evitando explosões em rajada.
         var pulled: u8 = 0;
-        while (pulled < 2 and w.rtp_out_count <= 140) : (pulled += 1) {
+        while (pulled < 3 and w.rtp_out_count <= 256) : (pulled += 1) {
             c.SDL_LockMutex(w.v.video_mu);
             if (w.v.tx_count == 0) {
                 c.SDL_UnlockMutex(w.v.video_mu);
@@ -1641,7 +1674,7 @@ const Worker = struct {
         const seq = w.video_rtp_seq;
         w.video_rtp_seq +%= 1;
 
-        const cache = &w.tx_rtp_cache[seq & 255];
+        const cache = &w.tx_rtp_cache[seq & 511];
         @memcpy(cache.payload[0..payload.len], payload);
         cache.len = @intCast(payload.len);
         cache.seq = seq;
@@ -1665,7 +1698,7 @@ const Worker = struct {
         if (w.rtp_out_count == 0 or w.rtp_out_ring.len == 0) return;
         // Envia rajada moderada (~12 pacotes por tick de 2ms) para não estourar buffers de roteador/SFU.
         var sent: u16 = 0;
-        const max_burst: u16 = if (w.rtp_out_count > 64) 18 else 12;
+        const max_burst: u16 = if (w.rtp_out_count > 120) 28 else if (w.rtp_out_count > 48) 18 else 12;
         while (w.rtp_out_count > 0 and sent < max_burst) : (sent += 1) {
             const s = &w.rtp_out_ring[w.rtp_out_head];
             w.sendVideoRtpRaw(s.payload[0..s.len], s.pt, s.marker, s.ts, s.seq);
@@ -1720,7 +1753,7 @@ const Worker = struct {
     }
 
     fn sendCachedRtx(w: *Worker, orig_seq: u16) void {
-        const p = &w.tx_rtp_cache[orig_seq & 255];
+        const p = &w.tx_rtp_cache[orig_seq & 511];
         if (!p.valid or p.seq != orig_seq) return;
         if (w.video_rtx_ssrc != 0 and p.len <= 1280) {
             var rtx_payload: [2 + 1280]u8 = undefined;
@@ -2588,7 +2621,7 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         if (target == null) {
             for (&slots) |*ds| {
                 if (!ds.active) {
-                    const dec = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch break;
+                    const dec = capture_backend.HwDecoder.openPref(.h264, 1920, 1080, null, hw_decode_pref.load(.acquire)) catch break;
                     ds.* = .{ .active = true, .ssrc = j_ssrc, .user = j_user, .dec = dec };
                     target = ds;
                     break;

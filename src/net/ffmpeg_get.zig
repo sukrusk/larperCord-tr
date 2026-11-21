@@ -122,6 +122,15 @@ fn le32(b: []const u8, at: usize) u32 {
 /// O conteúdo do arquivo `name`, em qualquer pasta do zip. Sem depender de ferramenta do sistema
 /// e sem usar o caminho de dentro do zip: quem escolhe onde gravar é o app.
 pub fn unzip(gpa: std.mem.Allocator, zip: []const u8, name: []const u8) ![]u8 {
+    return unzipMatch(gpa, zip, name, false);
+}
+
+/// Extrai pelo sufixo completo do caminho dentro do zip (ex: "x86_64/goodbyedpi.exe").
+pub fn unzipPath(gpa: std.mem.Allocator, zip: []const u8, suffix: []const u8) ![]u8 {
+    return unzipMatch(gpa, zip, suffix, true);
+}
+
+fn unzipMatch(gpa: std.mem.Allocator, zip: []const u8, name: []const u8, by_suffix: bool) ![]u8 {
     if (zip.len < 22) return error.BadZip;
     var e = zip.len - 22;
     while (le32(zip, e) != 0x06054b50) {
@@ -142,8 +151,13 @@ pub fn unzip(gpa: std.mem.Allocator, zip: []const u8, name: []const u8) ![]u8 {
         if (p + 46 + name_len > zip.len) return error.BadZip;
         const path = zip[p + 46..][0..name_len];
         p += 46 + name_len + extra_len + note_len;
-        const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[i + 1..] else path;
-        if (!std.mem.eql(u8, base, name)) continue;
+        const matched = if (by_suffix)
+            (std.mem.endsWith(u8, path, name) and (path.len == name.len or path[path.len - name.len - 1] == '/'))
+        else blk: {
+            const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[i + 1..] else path;
+            break :blk std.mem.eql(u8, base, name);
+        };
+        if (!matched) continue;
 
         if (local + 30 > zip.len or le32(zip, local) != 0x04034b50) return error.BadZip;
         const begin = local + 30 + le16(zip, local + 26) + le16(zip, local + 28);

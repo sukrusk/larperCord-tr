@@ -577,6 +577,8 @@ pub const Action = union(enum) {
     accept_call,
     decline_call,
     toggle_camera,
+    switch_camera: u8,
+    request_keyframe,
     open_stream_picker,
     start_screen_share: video_cfg.StreamConfig,
     stop_screen_share,

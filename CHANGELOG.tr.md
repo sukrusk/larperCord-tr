@@ -1,5 +1,18 @@
 # Sürüm Notları
 
+## 0.7.0
+
+**Ağ, DoH ve GoodbyeDPI**
+- Uygulama içi Şifreli DNS (DoH — Cloudflare `1.1.1.1` / Google `8.8.8.8` -> `CURLOPT_RESOLVE`) ve sürücüsüz OpenSSL TLS `ClientHello` SNI paket ayrıştırma (`tls_chrome.c` BIOS filtresi, Chrome 156 JA4 korunarak) varsayılan olarak eklendi; REST, Gateway, ses/kamera ve ekran paylaşımı (`*.discord.media`) bağlantılarında çalışır.
+- Ses ve görüntü WebSocket (`voice.zig` `*.discord.media`) bağlantıları da artık proxy, DoH ve TLS SNI ayrıştırma yolundan geçiyor; böylece kısıtlı ağlarda kamera ve ekran paylaşımı da sorunsuz açılıyor.
+- Windows için resmi `ValdikSS/GoodbyeDPI v0.2.3rc3-2` entegrasyonu eklendi: Ayarlar → Ağ ve Giriş ekranından SHA-256 doğrulamalı tek tık kurulum, Türkiye profilleri (`TR Önerilen -5`, `Superonline -9`, `Sadece DPI`, `Evrensel`), UAC ile başlat/durdur ve açılışta otomatik başlatma seçeneği sunuyor.
+
+**Ekran Paylaşımı ve Kamera**
+- Sabit masaüstü/pencere yayınında yakalama donduğunda son NV12/D3D11 karesini 250 ms aralıklı koruma ve `skey_cb` keyframe taleplerinde anında yeniden kodlama desteği eklendi; async H.264 MFT gecikmesi yarıya indirildi (`6ms`/`8ms`), 512 yuvalı RTP hız dengeleyiciyle 1080p60/4K60 akıcılığı artırıldı ve H.264 `<=1080p` çözünürlüklerde düşük gecikmeli SW kod çözücü (`~10x` daha hızlı) önceliklendirildi.
+- Yayın seçiciye **Yenile**, 6 monitöre kadar çoklu monitör seçimi, canlı bit hızı (`Otomatik`, `4M`, `8M`, `15M`, `25M` Mbps), **Fare imlecini yakala** (`IGraphicsCaptureSession2`) ve **Kendi yayınımı ön izle** seçenekleri ile pencere listesi kaydırma çubuğu eklendi.
+- Ses ve Video Ayarları, kamera seçimi + canlı kamera testi/ön izleme, yatay aynalama, bit hızı ve donanım hızlandırma (`cam_hw` / `hw_decode_pref`) ile genişletildi.
+- Çağrı ızgarası ve yayın sahnesine **Sığdır/Doldur (Zoom)**, **Kare İste (PLI)**, **Kaynak Değiştir**, **Kamera Büyüt** ve kamera/paylaşım düğmelerine sağ tık hızlı menüleri eklendi.
+
 ## 0.6.9
 
 **Kamera, ekran paylaşımı ve resmi Discord uyumu**

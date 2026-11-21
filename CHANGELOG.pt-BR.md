@@ -1,5 +1,19 @@
 # O que mudou em cada versão
 
+## 0.7.0
+
+**Rede, DoH e GoodbyeDPI**
+- Adicionado resolvedor DoH integrado (via `1.1.1.1` / `8.8.8.8` literal -> `CURLOPT_RESOLVE`) e fragmentação TLS SNI sem driver no BIO OpenSSL (`tls_chrome.c`, preservando JA4 do Chrome 156) — sem precisar de permissões de administrador.
+- Conectado o WebSocket de voz e vídeo (`voice.zig` `*.discord.media`) ao mesmo caminho de proxy, DoH e divisão TLS SNI que REST, Gateway e mídia já usam, destravando câmera e compartilhamento em redes com DPI.
+- Integrado gerenciador opcional do `ValdikSS/GoodbyeDPI v0.2.3rc3-2` no Windows em Configurações → Rede (download verificado por `SHA-256` em `<cache>/larpercord/dpi/`), com perfis pré-configurados, iniciar/parar via UAC e opção na abertura.
+- Adicionados controles rápidos de DoH e divisão TLS SNI direto no cartão de Rede da tela de login para entrar desde a primeira conexão.
+
+**Tela e câmera**
+- Corrigida a falta de quadros em janelas/telas paradas repetindo o último quadro NV12/VRAM a cada 250 ms ou pedido de keyframe, reduzidas pela metade as esperas do encoder MF assíncrono, fila RTP TX ampliada para 512 pacotes e decodificação de baixa latência em H.264 até 1080p.
+- Seletor de transmissão melhorado com botão Atualizar, suporte a até 6 monitores, controle real de bitrate (`Auto`, `4M`, `8M`, `15M`, `25M` Mbps), captura do cursor via `IGraphicsCaptureSession2`, alternador de prévia própria e barra de rolagem.
+- Página de Voz e Vídeo agora traz lista de câmeras reais, teste ao vivo da webcam em NV12, espelhamento horizontal local, bitrate unificado para câmera/tela e seleção `hw_preferred` para encoder e decoder.
+- Adicionados expansão de câmera para o palco, menus rápidos no botão direito de Câmera e Tela, e botões Ajustar/Preencher (Zoom), Pedir Keyframe (PLI), Trocar fonte e Parar no palco de vídeo.
+
 ## 0.6.9
 
 **Câmera, tela e compatibilidade oficial**

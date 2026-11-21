@@ -12,11 +12,24 @@
  * Roda depois de o curl montar o SSL_CTX (um por conexão), então manda sobre o que o
  * curl pôs. O que este OpenSSL não souber fazer fica de fora sem derrubar a conexão. */
 #include <openssl/ssl.h>
+#include <openssl/bio.h>
 #include <openssl/rand.h>
 #include <stdint.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <time.h>
+#endif
+
 int larper_tls_chrome(void *ssl_ctx, int h1_only);
+void larper_dpi_set_mode(int mode);
+int larper_dpi_get_mode(void);
 
 static const char ciphers12[] =
     "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
@@ -177,6 +190,217 @@ void larper_tls_alps_everywhere(void) { alps_everywhere = 1; }
 /* Algum servidor aceitou o ALPS (e a conexão dele caiu): o --tls-fingerprint avisa. */
 int larper_tls_alps_refused(void) { return alps_off; }
 
+/* 0 = kapali, 1 = Akilli TCP SNI bolme (yönetici gerektirmez), 2 = Sert TLS kayit + TCP bolme. */
+static volatile int dpi_split_mode = 1;
+static BIO_METHOD *dpi_bio_meth = NULL;
+
+void larper_dpi_set_mode(int mode) {
+    if (mode < 0) mode = 0;
+    if (mode > 2) mode = 2;
+    dpi_split_mode = mode;
+}
+
+int larper_dpi_get_mode(void) { return dpi_split_mode; }
+
+static void dpi_pause_1ms(void) {
+#ifdef _WIN32
+    Sleep(1);
+#else
+    struct timespec ts = {0, 1000000L};
+    nanosleep(&ts, NULL);
+#endif
+}
+
+static int find_sni_mid(const unsigned char *p, int len) {
+    /* TLS record (5) + handshake hdr (4) + version (2) + random (32) = 43 */
+    if (len < 48) return len / 2;
+    int pos = 43;
+    int sid = p[pos];
+    pos += 1 + sid;
+    if (pos + 2 > len) return len / 2;
+    int cs = ((int)p[pos] << 8) | p[pos + 1];
+    pos += 2 + cs;
+    if (pos + 1 > len) return len / 2;
+    int cm = p[pos];
+    pos += 1 + cm;
+    if (pos + 2 > len) return len / 2;
+    int ext_len = ((int)p[pos] << 8) | p[pos + 1];
+    pos += 2;
+    int ext_end = pos + ext_len;
+    if (ext_end > len) ext_end = len;
+    while (pos + 4 <= ext_end) {
+        int etype = ((int)p[pos] << 8) | p[pos + 1];
+        int elen = ((int)p[pos + 2] << 8) | p[pos + 3];
+        if (pos + 4 + elen > ext_end) break;
+        if (etype == 0 && elen >= 6) {
+            /* 2B list len + 1B type + 2B name len = 5B -> ortadan bol. */
+            int nlen = ((int)p[pos + 7] << 8) | p[pos + 8];
+            int mid = pos + 9 + nlen / 2;
+            if (mid > 9 && mid < len - 2) return mid;
+        }
+        pos += 4 + elen;
+    }
+    return len / 2;
+}
+
+typedef struct {
+    int mode;
+    int hello_done;
+    int rec_len;
+    int cut1;
+    int cut2;
+    int off;
+    unsigned char rec_buf[4096];
+} DpiBioState;
+
+static int dpi_bio_create(BIO *b) {
+    DpiBioState *st = OPENSSL_zalloc(sizeof(DpiBioState));
+    if (!st) return 0;
+    BIO_set_data(b, st);
+    BIO_set_init(b, 1);
+    return 1;
+}
+
+static int dpi_bio_destroy(BIO *b) {
+    DpiBioState *st = BIO_get_data(b);
+    if (st) {
+        OPENSSL_free(st);
+        BIO_set_data(b, NULL);
+    }
+    BIO_set_init(b, 0);
+    return 1;
+}
+
+static int dpi_bio_read(BIO *b, char *out, int outl) {
+    BIO *next = BIO_next(b);
+    if (!next) return 0;
+    int r = BIO_read(next, out, outl);
+    BIO_clear_retry_flags(b);
+    BIO_copy_next_retry(b);
+    return r;
+}
+
+static int dpi_bio_puts(BIO *b, const char *str) {
+    BIO *next = BIO_next(b);
+    return (next && str) ? BIO_puts(next, str) : 0;
+}
+
+static long dpi_bio_ctrl(BIO *b, int cmd, long num, void *ptr) {
+    BIO *next = BIO_next(b);
+    if (!next) return 0;
+    return BIO_ctrl(next, cmd, num, ptr);
+}
+
+static int dpi_bio_write(BIO *b, const char *in, int inl) {
+    BIO *next = BIO_next(b);
+    DpiBioState *st = BIO_get_data(b);
+    if (!next || !in || inl <= 0) return 0;
+    if (!st || st->hello_done || st->mode <= 0) {
+        int r = BIO_write(next, in, inl);
+        BIO_clear_retry_flags(b);
+        BIO_copy_next_retry(b);
+        return r;
+    }
+
+    const unsigned char *u = (const unsigned char *)in;
+    if (st->off == 0) {
+        /* Ilk paket TLS ClientHello degilse dogrudan gecir. */
+        if (inl < 48 || u[0] != 0x16 || u[1] != 0x03 || u[5] != 0x01) {
+            st->hello_done = 1;
+            int r = BIO_write(next, in, inl);
+            BIO_clear_retry_flags(b);
+            BIO_copy_next_retry(b);
+            return r;
+        }
+        int mid = find_sni_mid(u, inl);
+        if (st->mode == 2 && mid > 9 && inl + 5 <= (int)sizeof(st->rec_buf)) {
+            int p1 = mid - 5;
+            int p2 = inl - mid;
+            st->rec_buf[0] = 0x16;
+            st->rec_buf[1] = 0x03;
+            st->rec_buf[2] = 0x01;
+            st->rec_buf[3] = (unsigned char)(p1 >> 8);
+            st->rec_buf[4] = (unsigned char)p1;
+            memcpy(st->rec_buf + 5, u + 5, (size_t)p1);
+            int o2 = 5 + p1;
+            st->rec_buf[o2 + 0] = 0x16;
+            st->rec_buf[o2 + 1] = 0x03;
+            st->rec_buf[o2 + 2] = 0x01;
+            st->rec_buf[o2 + 3] = (unsigned char)(p2 >> 8);
+            st->rec_buf[o2 + 4] = (unsigned char)p2;
+            memcpy(st->rec_buf + o2 + 5, u + mid, (size_t)p2);
+            st->rec_len = o2 + 5 + p2;
+            st->cut1 = 7;
+            st->cut2 = o2;
+        } else {
+            st->rec_len = 0;
+            st->cut1 = 2;
+            st->cut2 = mid;
+        }
+    }
+
+    const char *src = st->rec_len > 0 ? (const char *)st->rec_buf : in;
+    int total = st->rec_len > 0 ? st->rec_len : inl;
+    while (st->off < total) {
+        int end = st->off < st->cut1 ? st->cut1 : (st->off < st->cut2 ? st->cut2 : total);
+        int w = BIO_write(next, src + st->off, end - st->off);
+        if (w <= 0) {
+            BIO_clear_retry_flags(b);
+            BIO_copy_next_retry(b);
+            return w;
+        }
+        st->off += w;
+        if (st->off < total && (st->off == st->cut1 || st->off == st->cut2)) dpi_pause_1ms();
+    }
+    st->hello_done = 1;
+    return inl;
+}
+
+static BIO_METHOD *ensure_dpi_bio_method(void) {
+    BIO_METHOD *cur = __atomic_load_n(&dpi_bio_meth, __ATOMIC_ACQUIRE);
+    if (cur) return cur;
+    BIO_METHOD *m = BIO_meth_new(BIO_TYPE_FILTER, "larper_dpi");
+    if (!m) return NULL;
+    BIO_meth_set_write(m, dpi_bio_write);
+    BIO_meth_set_read(m, dpi_bio_read);
+    BIO_meth_set_puts(m, dpi_bio_puts);
+    BIO_meth_set_ctrl(m, dpi_bio_ctrl);
+    BIO_meth_set_create(m, dpi_bio_create);
+    BIO_meth_set_destroy(m, dpi_bio_destroy);
+    BIO_METHOD *expected = NULL;
+    if (!__atomic_compare_exchange_n(&dpi_bio_meth, &expected, m, 0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        BIO_meth_free(m);
+        return expected;
+    }
+    return m;
+}
+
+static void dpi_info_cb(const SSL *ssl_c, int where, int ret) {
+    (void)ret;
+    if ((where & SSL_CB_HANDSHAKE_START) == 0) return;
+    int mode = __atomic_load_n(&dpi_split_mode, __ATOMIC_RELAXED);
+    if (mode <= 0) return;
+    SSL *s = (SSL *)ssl_c;
+    if (!SSL_get_servername(s, TLSEXT_NAMETYPE_host_name)) return;
+    BIO *wbio = SSL_get_wbio(s);
+    if (!wbio) return;
+    const char *mname = BIO_method_name(wbio);
+    if (mname && strcmp(mname, "larper_dpi") == 0) return;
+    BIO_METHOD *meth = ensure_dpi_bio_method();
+    if (!meth) return;
+    int fd = -1;
+    if (BIO_get_fd(wbio, &fd) <= 0 || fd < 0) return;
+    int one = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+    BIO *f = BIO_new(meth);
+    if (!f) return;
+    DpiBioState *st = BIO_get_data(f);
+    if (st) st->mode = mode;
+    BIO_up_ref(wbio);
+    BIO_push(f, wbio);
+    SSL_set0_wbio(s, f);
+}
+
 /* `h1_only`: a conexão só oferece HTTP/1.1 (o gateway e a voz, que são WebSocket, ou um
  * curl sem HTTP/2), e o ALPS, que é do h2, não vai. */
 int larper_tls_chrome(void *ssl_ctx, int h1_only) {
@@ -213,5 +437,6 @@ int larper_tls_chrome(void *ssl_ctx, int h1_only) {
     SSL_CTX_add_custom_ext(ctx, EXT_ECH, ee, add_ech, free_ech, NULL, accept_any, NULL);
     SSL_CTX_add_custom_ext(ctx, g1, cli, add_fixed, NULL, (void *)(uintptr_t)0, accept_any, NULL);
     SSL_CTX_add_custom_ext(ctx, g2, cli, add_fixed, NULL, (void *)(uintptr_t)1, accept_any, NULL);
+    SSL_CTX_set_info_callback(ctx, dpi_info_cb);
     return ok;
 }

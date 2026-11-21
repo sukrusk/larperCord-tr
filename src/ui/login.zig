@@ -688,9 +688,9 @@ fn form(f: *Frame, x: f32, y0: f32, w: f32) ?Result {
         y += br.h + 18;
     }
 
-    // Proxy: quem só chega ao Discord por um configura aqui, antes de entrar.
+    // Proxy & DPI: quem só chega ao Discord por um configura aqui, antes de entrar.
     if (f.env.proxy != null) {
-        const label = if (f.env.proxy_on) i18n.tr("Proxy ligado · mudar", "Proxy on · change") else i18n.tr("Conectar por um proxy", "Connect through a proxy");
+        const label = if (f.env.proxy_on) i18n.tr("Proxy & DPI ligado · mudar", "Proxy & DPI on · change") else i18n.tr("Proxy / Türkiye DPI Koruması", "Proxy / Turkey DPI Bypass");
         if (textLink(f, 38, x, y, w, label, "login:proxy")) l.proxy_open = true;
         y += 28;
     }

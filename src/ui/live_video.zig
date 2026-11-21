@@ -248,6 +248,10 @@ pub const Engine = struct {
     cam_last_ms: i64 = 0,
     cam_res: video_cfg.Resolution = .p1080,
     cam_fps: u8 = 30,
+    cam_dev_idx: u8 = 0,
+    cam_bitrate_kbps: std.atomic.Value(u32) = .init(4000),
+    cam_hw: std.atomic.Value(bool) = .init(true),
+    cam_preview_only: std.atomic.Value(bool) = .init(false),
     cam_tx_active_fn: ?*const fn () bool = null,
     stx_active_fn: ?*const fn () bool = null,
 
@@ -266,6 +270,7 @@ pub const Engine = struct {
     cam_stage_ready: bool = false,
 
     preview_wanted: std.atomic.Value(bool) = .init(true),
+    cursor_wanted: std.atomic.Value(bool) = .init(true),
     frame_dirty: std.atomic.Value(bool) = .init(false),
     wake_cb: ?*const fn () void = null,
 
@@ -377,8 +382,15 @@ pub const Engine = struct {
         return true;
     }
 
+    pub fn configureCamera(self: *Engine, bitrate_kbps: u32, hw_accel: bool, preview_only: bool) void {
+        self.cam_bitrate_kbps.store(@max(bitrate_kbps, 1200), .release);
+        self.cam_hw.store(hw_accel, .release);
+        self.cam_preview_only.store(preview_only, .release);
+    }
+
     pub fn startCamera(self: *Engine, dev_index: u8, res: video_cfg.Resolution, fps: u8, allow_demo_fallback: bool) bool {
         self.stopCamera();
+        self.cam_dev_idx = dev_index;
         self.cam_res = res;
         self.cam_fps = if (fps >= 45) 60 else 30;
         self.cam_denied = false;
@@ -575,6 +587,8 @@ pub const Engine = struct {
         self.stopWatch();
         self.native_cfg = cfg;
         self.native_mode = true;
+        self.preview_wanted.store(cfg.preview_self, .release);
+        self.cursor_wanted.store(cfg.capture_cursor, .release);
         self.demo_res = cfg.resolution;
         self.demo_fps = if (cfg.fps >= 45) 60 else 30;
         self.demo_source = cfg.kind;
@@ -669,6 +683,10 @@ pub const Engine = struct {
     }
 
     fn emitCameraEncoded(self: *Engine, w: u16, h: u16, y: []const u8, yp: u32, uv: []const u8, uvp: u32, pts_us: i64) void {
+        if (self.cam_preview_only.load(.acquire)) {
+            if (self.cam_enc_thread != null) self.stopCamEncWorker();
+            return;
+        }
         if (self.tx_mu) |m| c.SDL_LockMutex(m);
         const cb = self.cam_tx_cb;
         if (self.tx_mu) |m| c.SDL_UnlockMutex(m);
@@ -950,6 +968,8 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     defer if (local_buf.len > 0) nv12_pattern.freeNv12(&local_buf);
     var enc_w: u16 = 0;
     var enc_h: u16 = 0;
+    var last_br: u32 = @max(engine.cam_bitrate_kbps.load(.acquire), 1200);
+    var last_hw: bool = engine.cam_hw.load(.acquire);
 
     const mu = engine.cam_enc_mu orelse return 0;
     const cond = engine.cam_enc_cond orelse return 0;
@@ -982,15 +1002,22 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         c.SDL_UnlockMutex(mu);
 
         if (!copied) continue;
-        if (enc_opt != null and (enc_w != w or enc_h != h)) {
+        const cur_hw = engine.cam_hw.load(.acquire);
+        const cur_br = @max(engine.cam_bitrate_kbps.load(.acquire), 1200);
+        if (enc_opt != null and (enc_w != w or enc_h != h or last_hw != cur_hw)) {
             enc_opt.?.deinit();
             enc_opt = null;
         }
         if (enc_opt == null) {
-            enc_opt = capture_backend.HwEncoder.open(.h264, w, h, @max(engine.cam_fps, 15), 2500, null) catch null;
+            enc_opt = capture_backend.HwEncoder.openPref(.h264, w, h, @max(engine.cam_fps, 15), cur_br, null, cur_hw) catch null;
             enc_w = w;
             enc_h = h;
+            last_br = cur_br;
+            last_hw = cur_hw;
             if (enc_opt) |*e| e.requestKeyframe();
+        } else if (cur_br != last_br) {
+            last_br = cur_br;
+            enc_opt.?.setBitrate(cur_br);
         }
         if (engine.tx_mu) |tm| c.SDL_LockMutex(tm);
         const cb = engine.cam_tx_cb;
@@ -1080,6 +1107,9 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     var pcm_buf: [1920]f32 = undefined;
     var last_preview_ms: i64 = 0;
     var last_br_check_ms: i64 = 0;
+    var last_frame_ms: i64 = 0;
+    var has_sent_frame: bool = false;
+    var last_cursor: bool = engine.cursor_wanted.load(.acquire);
     var last_br_kbps: u32 = cfg.bitrate_kbps;
     var next_tick_ns: u64 = c.SDL_GetTicksNS();
 
@@ -1106,7 +1136,17 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                 c.SDL_Delay(200);
                 continue;
             }
+            last_cursor = engine.cursor_wanted.load(.acquire);
+            src_opt.?.setCursorCapture(last_cursor);
+            has_sent_frame = false;
+            last_frame_ms = 0;
             next_tick_ns = c.SDL_GetTicksNS();
+        }
+
+        const cur_cursor = engine.cursor_wanted.load(.acquire);
+        if (cur_cursor != last_cursor) {
+            last_cursor = cur_cursor;
+            src_opt.?.setCursorCapture(cur_cursor);
         }
 
         if (engine.tx_mu) |m| c.SDL_LockMutex(m);
@@ -1141,9 +1181,23 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
             continue;
         };
 
-        if (got) |f| {
+        const stx_active = if (engine.stx_active_fn) |p| p() else true;
+        const tx_fn_opt = if (stx_active) stx_cb else null;
+        const req_kf = if (tx_fn_opt != null) (if (skey_cb) |kf| kf(stx_ctx) else false) else false;
+
+        var active_frame: ?media_if.CaptureFrame = got;
+        var is_fresh = false;
+        if (got != null) {
+            is_fresh = true;
+            has_sent_frame = true;
             video_diag.txCap();
-            if (preview_due and f.nv12_y.len > 0) {
+        } else if (has_sent_frame and tx_fn_opt != null and (req_kf or t0 - last_frame_ms >= 250)) {
+            active_frame = src_opt.?.repeatNv12(cpu_needed_tx, pts_us) catch null;
+        }
+
+        if (active_frame) |f| {
+            last_frame_ms = t0;
+            if (is_fresh and preview_due and f.nv12_y.len > 0) {
                 last_preview_ms = t0;
                 engine.watch_slot.uploadNv12(
                     f.width,
@@ -1158,15 +1212,14 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                 );
                 engine.notifyFrame();
             }
-            const stx_active = if (engine.stx_active_fn) |p| p() else true;
-            if (if (stx_active) stx_cb else null) |tx_fn| {
+            if (tx_fn_opt) |tx_fn| {
                 const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu) .h264 else if (cfg.codec == .auto) .h264 else cfg.codec;
                 if (enc_opt == null) {
-                    enc_opt = capture_backend.HwEncoder.open(eff_codec, f.width, f.height, cfg.fps, cfg.bitrate_kbps, src_opt.?.d3d11Device()) catch null;
+                    enc_opt = capture_backend.HwEncoder.openPref(eff_codec, f.width, f.height, cfg.fps, cfg.bitrate_kbps, src_opt.?.d3d11Device(), cfg.hw_accel) catch null;
                     if (enc_opt) |*e| e.requestKeyframe();
                 }
                 if (enc_opt) |*e| {
-                    if (skey_cb) |kf| if (kf(stx_ctx)) e.requestKeyframe();
+                    if (req_kf) e.requestKeyframe();
                     if (t0 - last_br_check_ms >= 500) {
                         last_br_check_ms = t0;
                         if (stream_target_bitrate_fn) |bfn| {
@@ -1190,12 +1243,16 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                 enc_opt.?.deinit();
                 enc_opt = null;
             }
-            next_tick_ns += interval_ns;
-            const now_after_ns = c.SDL_GetTicksNS();
-            if (now_after_ns > next_tick_ns + interval_ns * 2) next_tick_ns = now_after_ns;
-            if (next_tick_ns > now_after_ns) {
-                const rem_ms: u32 = @intCast(@min((next_tick_ns - now_after_ns) / 1_000_000, interval_ms));
-                if (rem_ms > 0) c.SDL_Delay(rem_ms);
+            if (is_fresh) {
+                next_tick_ns += interval_ns;
+                const now_after_ns = c.SDL_GetTicksNS();
+                if (now_after_ns > next_tick_ns + interval_ns * 2) next_tick_ns = now_after_ns;
+                if (next_tick_ns > now_after_ns) {
+                    const rem_ms: u32 = @intCast(@min((next_tick_ns - now_after_ns) / 1_000_000, interval_ms));
+                    if (rem_ms > 0) c.SDL_Delay(rem_ms);
+                }
+            } else {
+                c.SDL_Delay(2);
             }
         } else {
             // WGC returns immediately when no new desktop frame is ready; poll shortly (2ms) instead of sleeping a full frame.

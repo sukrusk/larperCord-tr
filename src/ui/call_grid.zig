@@ -152,15 +152,19 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
     const lt = i18n.tr("AO VIVO", "LIVE");
     const lf = ctx.ui.get(.bold);
     const live_r: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 12, .h = 20 };
+    const cam_exp_r: d.Rect = .{ .x = r.x + 10, .y = if (vf.self_stream) r.y + 34 else r.y + 10, .w = 24, .h = 24 };
+    const peer_slot = if (!mine) live_video.eng.peerCamSlot(uid) else null;
+    const cam_slot_opt: ?*live_video.FrameSlot = if (mine and ctx.st.cam_on) &live_video.eng.cam_slot else peer_slot;
     if (hb.clicked and vf.self_stream and live_r.contains(ctx.mouse.x, ctx.mouse.y)) {
         ctx.act(.{ .watch_stream = uid });
+    } else if (hb.clicked and cam_slot_opt != null and cam_exp_r.contains(ctx.mouse.x, ctx.mouse.y)) {
+        ctx.st.spotlight_cam = if (ctx.st.spotlight_cam == uid) 0 else uid;
+        ctx.st.spotlight_fullscreen = false;
     } else if (hb.clicked or hb.right) {
         openMenu(ctx, uid);
     }
 
     var drew_cam = false;
-    const peer_slot = if (!mine) live_video.eng.peerCamSlot(uid) else null;
-    const cam_slot_opt: ?*live_video.FrameSlot = if (mine and ctx.st.cam_on) &live_video.eng.cam_slot else peer_slot;
     if (cam_slot_opt) |slot_ptr| {
         anim.every(if (ctx.st.settings.video_fps == 1) 16 else 33);
         if (slot_ptr.view(ctx.images.renderer)) |cam_v| {
@@ -172,18 +176,27 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
             const dh = vh * sc;
             const vx = inner.x + (inner.w - dw) / 2;
             const vy = inner.y + (inner.h - dh) / 2;
+            const mirror = mine and ctx.st.settings.video_cam_mirror;
             c.ImDrawList_AddImageRounded(
                 dl,
                 cam_v.ref,
                 d.v(vx, vy),
                 d.v(vx + dw, vy + dh),
-                d.v(0, 0),
-                d.v(1, 1),
+                if (mirror) d.v(1, 0) else d.v(0, 0),
+                if (mirror) d.v(0, 1) else d.v(1, 1),
                 d.Rgba.white.u(),
                 @max(radius - 2, 4),
                 0,
             );
             drew_cam = true;
+            if (hb.hovered or ctx.st.spotlight_cam == uid) {
+                const exp_bg = if (ctx.st.spotlight_cam == uid) ctx.col(.accent) else ctx.col(.bg).alpha(0.76);
+                d.rect(dl, cam_exp_r, exp_bg, 6);
+                icons.fullscreen(dl, cam_exp_r.x + 12, cam_exp_r.y + 12, d.Rgba.white.u());
+                if (cam_exp_r.contains(ctx.mouse.x, ctx.mouse.y)) {
+                    d.tip(ctx, cam_exp_r, i18n.tr("Kamerayı büyüt / küçült", "Expand / restore camera"), true);
+                }
+            }
         }
     }
 
@@ -444,7 +457,10 @@ pub fn page(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) void 
     // Esc volta para a conversa, se não for para fechar outra coisa (menu, paleta,
     // Configurações, a imagem aberta, a busca) nem estiver digitando.
     if (c.ImGui_IsKeyPressed(c.ImGuiKey_Escape) and escFree(ctx)) {
-        if (ctx.st.watch_owner != 0) {
+        if (ctx.st.spotlight_cam != 0) {
+            ctx.st.spotlight_cam = 0;
+            ctx.st.spotlight_fullscreen = false;
+        } else if (ctx.st.watch_owner != 0) {
             ctx.act(.{ .watch_stream = 0 });
         } else {
             ctx.act(.{ .show_call = 0 });
@@ -452,14 +468,15 @@ pub fn page(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, cs: *ChannelState) void 
     }
     qa.mark(r, "grid-view", .{});
     const tty = d.is(n, "variant", "irc", "");
-    if (ctx.st.watch_owner != 0) {
+    const cam_spot = ctx.st.spotlight_cam;
+    if (ctx.st.watch_owner != 0 or cam_spot != 0) {
         if (ctx.st.spotlight_fullscreen or r.h < 280) {
-            stream_view.draw(ctx, r.inset(12, 8));
+            if (cam_spot != 0) stream_view.drawCam(ctx, r.inset(12, 8), cam_spot) else stream_view.draw(ctx, r.inset(12, 8));
             return;
         }
         const stage_h = @round(@max(r.h * 0.68, r.h - 160));
         const stage_r: d.Rect = .{ .x = r.x + 12, .y = r.y + 8, .w = @max(r.w - 24, 60), .h = @max(stage_h - 12, 60) };
-        stream_view.draw(ctx, stage_r);
+        if (cam_spot != 0) stream_view.drawCam(ctx, stage_r, cam_spot) else stream_view.draw(ctx, stage_r);
         const strip_r: d.Rect = .{ .x = r.x, .y = r.y + stage_h, .w = r.w, .h = @max(r.h - stage_h, 40) };
         people(ctx, n, strip_r, cs, tty, "##call-grid");
         return;
@@ -650,6 +667,7 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
         icons.camera(dl, cr.x + b / 2, cr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u(), !on);
         d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch.hovered);
         if (ch.clicked) ctx.act(.toggle_camera);
+        if (ch.right) devices.open(ctx, .cam, cr);
         x += b + gap;
     }
     // Compartilhar tela / Go Live 4K.
@@ -664,6 +682,7 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
         icons.screen(dl, sr.x + b / 2, sr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u());
         d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), sh.hovered);
         if (sh.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
+        if (sh.right) devices.open(ctx, .share, sr);
         x += b + gap;
     }
     if (pip_ch) |vch| {

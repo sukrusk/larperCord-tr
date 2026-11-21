@@ -19,6 +19,7 @@ const S = @import("settings_state.zig");
 const voz_audio = @import("../net/voz_audio.zig");
 const popup = @import("popup.zig");
 const pick = @import("device_pick.zig");
+const live_video = @import("live_video.zig");
 
 pub const Which = state.DeviceMenu;
 
@@ -37,6 +38,8 @@ const link_h: f32 = 32;
 /// Cópia da lista que a thread de áudio leu por último (a página de voz tem a dela).
 var mic_list: voz_audio.DeviceList = .{};
 var out_list: voz_audio.DeviceList = .{};
+var cam_list: [8]live_video.CamDevice = undefined;
+var cam_count: usize = 0;
 var list_gen: u32 = 0;
 /// O volume estava sendo arrastado no quadro anterior: grava ao soltar.
 var held_prev: [2]bool = .{ false, false };
@@ -46,8 +49,12 @@ var wait_until: i64 = 0;
 
 /// Abre o menu acima de `anchor` (o botão que foi clicado).
 pub fn open(ctx: *d.Ctx, which: Which, anchor: d.Rect) void {
-    voz_audio.requestList();
-    wait_until = ctx.now_ms + 1500;
+    if (which == .cam) {
+        cam_count = if (qa_fake or qa.on()) 0 else live_video.eng.listCameras(&cam_list);
+    } else if (which != .share) {
+        voz_audio.requestList();
+        wait_until = ctx.now_ms + 1500;
+    }
     ctx.popup(.{ .devices = .{ .which = which, .x = anchor.x, .y = anchor.y } });
 }
 
@@ -77,6 +84,8 @@ fn linesOf(side: Side, s: *const S.Settings, cap: usize) f32 {
 }
 
 pub fn draw(ctx: *d.Ctx, which: Which, x: f32, y: f32) void {
+    if (which == .cam) return drawCamMenu(ctx, x, y);
+    if (which == .share) return drawShareMenu(ctx, x, y);
     refresh();
     // A lista chega pela thread de áudio, sem evento na janela: acorda só até
     // ela chegar (no máximo 1,5 s), parado não custa nada.
@@ -116,6 +125,149 @@ pub fn draw(ctx: *d.Ctx, which: Which, x: f32, y: f32) void {
     icons.gear(dl, lr.right() - 18, lr.y + lr.h / 2, ink.u());
     if (lh.clicked) {
         ctx.st.settings.page = .voz;
+        ctx.act(.open_settings);
+        popup.close(ctx);
+    }
+}
+
+fn quickMenuRow(ctx: *d.Ctx, dl: *c.ImDrawList, r: d.Rect, id: usize, label: []const u8, checked: bool, danger: bool) bool {
+    const hb = d.hit(ctx, id, r);
+    const rr = @max(ctx.th.radius - 2, 2);
+    if (hb.hovered) d.rect(dl, r, if (danger) ctx.col(.danger) else ctx.col(.accent), rr);
+    const tc = if (hb.hovered) d.Rgba.white else if (danger) ctx.col(.danger) else ctx.col(.text);
+    _ = d.textClipped(dl, ctx.ui.get(if (checked) .semibold else .regular), 13.5, r.x + 10, d.centerY(r, 13.5), tc, label, r.w - 38);
+    if (checked) {
+        const cx = r.right() - 16;
+        const cy = r.y + r.h / 2;
+        const ck = if (hb.hovered) d.Rgba.white else ctx.col(.accent);
+        d.line(dl, cx - 5, cy, cx - 1.5, cy + 3.5, ck, 2);
+        d.line(dl, cx - 1.5, cy + 3.5, cx + 5, cy - 4, ck, 2);
+    }
+    return hb.clicked;
+}
+
+fn drawCamMenu(ctx: *d.Ctx, x: f32, y: f32) void {
+    const s = &ctx.st.settings;
+    const rows = @max(cam_count, 1);
+    const h = pad * 2 + head_h + @as(f32, @floatFromInt(rows)) * row_h + sep_h + row_h * 2 + link_h;
+    const r = popup.fit(ctx, x, y - h - 6, menu_w, h);
+    const dl = popup.beginWindow("##devices", r);
+    defer c.ImGui_End();
+    ctx.dl = dl;
+    qa.mark(r, "device-menu", .{});
+    const radius = @max(ctx.th.radius, 4);
+    d.shadow(dl, r, radius, 14, ctx.col(.shadow));
+    d.rect(dl, r, ctx.col(.overlay), radius);
+    d.border(dl, r, ctx.col(.border), radius, 1);
+
+    var yy = r.y + pad;
+    d.text(dl, ctx.ui.get(.semibold), 11.5, r.x + 16, yy + 8, ctx.col(.muted), i18n.tr("KAMERALAR", "CAMERAS"));
+    yy += head_h;
+
+    if (cam_count == 0) {
+        _ = d.textClipped(dl, ctx.ui.get(.regular), 13, r.x + 16, yy + 7, ctx.col(.muted), i18n.tr("Kamera bulunamadı", "No cameras detected"), r.w - 32);
+        yy += row_h;
+    } else {
+        for (0..cam_count) |i| {
+            const ir: d.Rect = .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 };
+            if (quickMenuRow(ctx, dl, ir, base_id + 0x500 + i, cam_list[i].slice(), s.video_cam_idx == i, false)) {
+                ctx.act(.{ .switch_camera = @intCast(i) });
+                popup.close(ctx);
+                return;
+            }
+            yy += row_h;
+        }
+    }
+
+    d.line(dl, r.x + 10, yy + 4, r.right() - 10, yy + 4, ctx.col(.border), 1);
+    yy += sep_h;
+
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x520, i18n.tr("Kamerayı aynala", "Mirror preview"), s.video_cam_mirror, false)) {
+        s.video_cam_mirror = !s.video_cam_mirror;
+        ctx.act(.save_settings);
+        popup.close(ctx);
+        return;
+    }
+    yy += row_h;
+
+    const cam_lbl = if (ctx.st.cam_on) i18n.tr("Kamerayı kapat", "Turn camera off") else i18n.tr("Kamerayı aç", "Turn camera on");
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x521, cam_lbl, false, ctx.st.cam_on)) {
+        ctx.act(.toggle_camera);
+        popup.close(ctx);
+        return;
+    }
+    yy += row_h;
+
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x522, i18n.tr("Ses ve Video Ayarları", "Voice & Video Settings"), false, false)) {
+        s.page = .voz;
+        ctx.act(.open_settings);
+        popup.close(ctx);
+    }
+}
+
+fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
+    const s = &ctx.st.settings;
+    const n_extra: f32 = if (ctx.st.stream_on) 4 else 2;
+    const h = pad * 2 + head_h + n_extra * row_h + sep_h + link_h;
+    const r = popup.fit(ctx, x, y - h - 6, menu_w, h);
+    const dl = popup.beginWindow("##devices", r);
+    defer c.ImGui_End();
+    ctx.dl = dl;
+    qa.mark(r, "device-menu", .{});
+    const radius = @max(ctx.th.radius, 4);
+    d.shadow(dl, r, radius, 14, ctx.col(.shadow));
+    d.rect(dl, r, ctx.col(.overlay), radius);
+    d.border(dl, r, ctx.col(.border), radius, 1);
+
+    var yy = r.y + pad;
+    d.text(dl, ctx.ui.get(.semibold), 11.5, r.x + 16, yy + 8, ctx.col(.muted), i18n.tr("EKRAN PAYLAŞIMI", "SCREEN SHARE"));
+    yy += head_h;
+
+    const pick_lbl = if (ctx.st.stream_on) i18n.tr("Kaynak / Kalite Değiştir", "Switch source / quality") else i18n.tr("Ekran / Uygulama Seç…", "Choose screen / app…");
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x540, pick_lbl, false, false)) {
+        ctx.act(.open_stream_picker);
+        return;
+    }
+    yy += row_h;
+
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x541, i18n.tr("Fare imlecini yakala", "Capture mouse cursor"), s.video_cursor, false)) {
+        s.video_cursor = !s.video_cursor;
+        live_video.eng.cursor_wanted.store(s.video_cursor, .release);
+        ctx.act(.save_settings);
+        popup.close(ctx);
+        return;
+    }
+    yy += row_h;
+
+    if (ctx.st.stream_on) {
+        const self_shown = ctx.st.watch_owner == ctx.store.me and s.video_self_preview;
+        if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x542, i18n.tr("Kendi ön izlemem", "Self preview on stage"), self_shown, false)) {
+            if (self_shown) {
+                s.video_self_preview = false;
+                ctx.act(.{ .watch_stream = 0 });
+            } else {
+                s.video_self_preview = true;
+                ctx.act(.{ .watch_stream = ctx.store.me });
+            }
+            ctx.act(.save_settings);
+            popup.close(ctx);
+            return;
+        }
+        yy += row_h;
+
+        if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x543, i18n.tr("Yayını Durdur", "Stop stream"), false, true)) {
+            ctx.act(.stop_screen_share);
+            popup.close(ctx);
+            return;
+        }
+        yy += row_h;
+    }
+
+    d.line(dl, r.x + 10, yy + 4, r.right() - 10, yy + 4, ctx.col(.border), 1);
+    yy += sep_h;
+
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x544, i18n.tr("Ses ve Video Ayarları", "Voice & Video Settings"), false, false)) {
+        s.page = .voz;
         ctx.act(.open_settings);
         popup.close(ctx);
     }

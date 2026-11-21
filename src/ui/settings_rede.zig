@@ -6,9 +6,12 @@ const std = @import("std");
 const c = @import("c");
 const d = @import("draw.zig");
 const qa = @import("qa.zig");
+const anim = @import("anim.zig");
 const i18n = @import("i18n.zig");
 const S = @import("settings_state.zig");
 const proxy = @import("../net/proxy.zig");
+const dpi_bypass = @import("../net/dpi_bypass.zig");
+const goodbyedpi = @import("../net/goodbyedpi.zig");
 
 pub const Where = enum { settings, login };
 
@@ -19,12 +22,14 @@ pub var proxy_show = false;
 /// O valor das configurações que está nos campos (se mudar por fora, eles acompanham).
 var proxy_seen: S.Text = .{};
 var proxy_err: ?proxy.BuildError = null;
+var gdpi_confirm = false;
 
 /// A página inteira.
 pub fn page(p: anytype) void {
     p.title(i18n.tr("Rede", "Network"));
     p.heading(i18n.tr("Proxy", "Proxy"));
     form(p, .settings);
+    dpiSection(p, .settings);
 }
 
 /// Colar a URL inteira no endereço espalha tudo pelos campos na hora. Digitando,
@@ -177,4 +182,141 @@ pub fn form(p: anytype, where: Where) void {
         if (where == .login) ctx.act(.save_settings);
     }
     if (where == .settings) p.toggle(i18n.tr("Usar o proxy em tudo", "Use the proxy for everything"), i18n.tr("Também o Discord: API, imagens, vídeos e o gateway (este a partir da próxima conexão). As calls de voz sempre conectam direto.", "Discord too: API, images, videos and the gateway (from the next connection). Voice calls always connect directly."), &s.proxy_all);
+    if (where == .login) dpiSection(p, .login);
+}
+
+pub fn dpiSection(p: anytype, where: Where) void {
+    const ctx = p.ctx;
+    const s = &ctx.st.settings;
+
+    p.divider();
+    p.heading(i18n.tr("Türkiye DPI / Sansür Aşımı (DoH & GoodbyeDPI)", "Turkey DPI / Block Bypass (DoH & GoodbyeDPI)"));
+
+    if (where == .login) {
+        const old_doh = s.dpi_doh;
+        const old_split = s.dpi_split;
+        p.segmented(&.{ i18n.tr("Kapalı", "Off"), "Cloudflare", "Google" }, &s.dpi_doh);
+        var split_on = s.dpi_split > 0;
+        p.toggle(
+            i18n.tr("Sürücüsüz TLS SNI bölme", "Driverless TLS SNI split"),
+            i18n.tr("Ek kurulum olmadan ses, kamera ve yayın engellerini aşar.", "Bypasses ISP throttling including voice, camera and stream without extra drivers."),
+            &split_on,
+        );
+        s.dpi_split = if (split_on) (if (old_split == 0) 1 else old_split) else 0;
+        if (s.dpi_doh != old_doh or s.dpi_split != old_split) {
+            dpi_bypass.setConfig(s.dpi_doh, s.dpi_split);
+            ctx.act(.save_settings);
+        }
+        return;
+    }
+
+    p.note(i18n.tr(
+        "Uygulama içi Şifreli DNS (DoH) ve TLS SNI ayrıştırma yönetici izni gerektirmez; REST, Gateway, ses/kamera ve ekran paylaşımı (*.discord.media) bağlantılarını korur.",
+        "Built-in Encrypted DNS (DoH) and TLS SNI splitting need no admin rights and cover REST, Gateway, voice/camera and screen share (*.discord.media).",
+    ));
+
+    const prev_doh = s.dpi_doh;
+    const prev_split = s.dpi_split;
+    p.heading(i18n.tr("Şifreli DNS (DoH)", "Encrypted DNS (DoH)"));
+    p.segmented(&.{ i18n.tr("Kapalı", "Off"), "Cloudflare (1.1.1.1)", "Google (8.8.8.8)" }, &s.dpi_doh);
+
+    p.heading(i18n.tr("TLS SNI Paket Ayrıştırma (Sürücüsüz)", "TLS SNI Packet Splitting (Driverless)"));
+    p.segmented(&.{ i18n.tr("Kapalı", "Off"), i18n.tr("Akıllı Bölme", "Smart Split"), i18n.tr("Sert Bölme", "Strong Split") }, &s.dpi_split);
+    if (s.dpi_doh != prev_doh or s.dpi_split != prev_split) {
+        dpi_bypass.setConfig(s.dpi_doh, s.dpi_split);
+    }
+
+    if (!goodbyedpi.supported()) {
+        p.note(i18n.tr(
+            "GoodbyeDPI (WinDivert) yalnızca Windows'ta çalışır. Bu sistemde yukarıdaki uygulama içi DoH + TLS bölme yeterlidir.",
+            "GoodbyeDPI (WinDivert) is Windows-only. On this platform the built-in DoH + TLS split above handles DPI bypass.",
+        ));
+        return;
+    }
+
+    p.divider();
+    p.heading(i18n.tr("GoodbyeDPI (Windows — WinDivert)", "GoodbyeDPI (Windows — WinDivert)"));
+    const running = !qa.on() and goodbyedpi.isRunning(ctx.now_ms);
+    if (running or goodbyedpi.phase() == .downloading or goodbyedpi.phase() == .installing) anim.every(400);
+
+    var sb: [320]u8 = undefined;
+    switch (goodbyedpi.phase()) {
+        .downloading => {
+            p.note(i18n.fmt(&sb, "GoodbyeDPI indiriliyor: %{d}", "Downloading GoodbyeDPI: {d}%", .{goodbyedpi.percent()}));
+            return;
+        },
+        .installing => {
+            p.note(i18n.tr("GoodbyeDPI çıkarılıyor ve doğrulanıyor…", "Extracting and verifying GoodbyeDPI…"));
+            return;
+        },
+        .failed => {
+            p.note(switch (goodbyedpi.failure()) {
+                .network => i18n.tr("GoodbyeDPI indirilemedi. İnternet bağlantısını kontrol edip tekrar dene.", "Couldn't download GoodbyeDPI. Check your connection and try again."),
+                .hash => i18n.tr("SHA-256 doğrulaması eşleşmedi; güvenlik için kurulum iptal edildi.", "SHA-256 checksum mismatch; install cancelled for safety."),
+                else => i18n.tr("GoodbyeDPI diske yazılamadı.", "Couldn't write GoodbyeDPI to disk."),
+            });
+        },
+        .idle, .ready => {},
+    }
+
+    const installed = !qa.on() and goodbyedpi.isInstalled();
+    if (!installed) {
+        p.note(i18n.tr(
+            "Türk Telekom / Superonline gibi agresif ISS filtreleri tüm UDP/TCP trafiğini keserse resmi ValdikSS/GoodbyeDPI v0.2.3rc3-2 sürümünü SHA-256 doğrulamalı indirip buradan başlatabilirsin.",
+            "If aggressive ISP filtering (Superonline/TT) still drops UDP/TCP media, download the official SHA-256 verified ValdikSS/GoodbyeDPI v0.2.3rc3-2 bundle and run it here.",
+        ));
+        if (gdpi_confirm) {
+            p.note(i18n.fmt(
+                &sb,
+                "{s} adresinden 1,1 MB indirilecek, SHA-256 kontrolü sonrası önbellek klasörüne kurulacak. Başlatırken standart Windows UAC izni sorulur.",
+                "Downloads 1.1 MB from {s}, verifies SHA-256 and extracts to cache folder. Running it will show a standard Windows UAC prompt.",
+                .{goodbyedpi.source},
+            ));
+            if (p.button(i18n.tr("Şimdi indir", "Download now"), false)) {
+                gdpi_confirm = false;
+                goodbyedpi.qa_no_network = qa.on();
+                goodbyedpi.startDownload();
+            }
+            p.sameLine();
+            if (p.buttonSoft(i18n.tr("Vazgeç", "Cancel"))) gdpi_confirm = false;
+        } else if (p.button(i18n.tr("GoodbyeDPI İndir ve Kur", "Download & Install GoodbyeDPI"), false)) {
+            gdpi_confirm = true;
+        }
+        return;
+    }
+
+    p.note(if (running)
+        i18n.tr("Durum: GoodbyeDPI çalışıyor (sistem geneli DPI aşımı etkin).", "Status: GoodbyeDPI is running (system-wide DPI bypass active).")
+    else
+        i18n.tr("Durum: GoodbyeDPI kurulu ama çalışmıyor.", "Status: GoodbyeDPI is installed and stopped."));
+
+    p.heading(i18n.tr("Türkiye Profili", "Turkey Preset"));
+    p.segmented(&.{
+        i18n.tr("TR Önerilen (-5)", "TR Default (-5)"),
+        "Superonline (-9)",
+        i18n.tr("Sadece DPI (-5)", "DPI Only (-5)"),
+        i18n.tr("Evrensel", "Universal"),
+    }, &s.goodbyedpi_preset);
+
+    if (running) {
+        if (p.button(i18n.tr("GoodbyeDPI Durdur", "Stop GoodbyeDPI"), true)) {
+            _ = goodbyedpi.stopProcess();
+        }
+        p.sameLine();
+        if (p.buttonSoft(i18n.tr("Yeni profille başlat", "Restart with preset"))) {
+            _ = goodbyedpi.stopProcess();
+            _ = goodbyedpi.startProcess(s.goodbyedpi_preset);
+        }
+    } else {
+        if (p.button(i18n.tr("GoodbyeDPI Başlat (UAC)", "Start GoodbyeDPI (UAC)"), false)) {
+            if (!goodbyedpi.startProcess(s.goodbyedpi_preset)) {
+                ctx.st.showToast(ctx.now_ms, true, "GoodbyeDPI başlatılamadı (UAC iptal edilmiş olabilir)", "Couldn't launch GoodbyeDPI (UAC may have been cancelled)", .{});
+            }
+        }
+    }
+    p.toggle(
+        i18n.tr("Uygulama açılışında GoodbyeDPI otomatik başlat", "Auto-start GoodbyeDPI when larperCord opens"),
+        i18n.tr("Kuruluysa her açılışta seçili Türkiye profiliyle UAC üzerinden başlatmayı önerir.", "When installed, requests startup launch via UAC with the chosen preset."),
+        &s.goodbyedpi_auto,
+    );
 }

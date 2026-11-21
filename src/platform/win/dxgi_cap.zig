@@ -286,6 +286,48 @@ pub const Nv12GpuCtx = struct {
         return frame;
     }
 
+    pub fn repeatFrame(self: *Nv12GpuCtx, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
+        const nv12_tex = self.nv12_gpu orelse return null;
+        if (self.out_w < 2 or self.out_h < 2) return null;
+        var frame: media_if.CaptureFrame = .{
+            .width = self.out_w,
+            .height = self.out_h,
+            .gpu_tex = nv12_tex,
+            .pts_us = pts_us,
+        };
+        if (want_cpu_copy) {
+            const total = video_cfg.nv12ByteSize(self.out_w, self.out_h);
+            const y_len = @as(usize, self.out_w) * @as(usize, self.out_h);
+            if (self.cpu_scratch.len == total) {
+                frame.nv12_y = self.cpu_scratch[0..y_len];
+                frame.nv12_uv = self.cpu_scratch[y_len..total];
+                frame.y_pitch = self.out_w;
+                frame.uv_pitch = self.out_w;
+            } else {
+                try self.ensureStaging();
+                try self.readbackNv12(&frame);
+            }
+        }
+        return frame;
+    }
+
+    fn ensureStaging(self: *Nv12GpuCtx) !void {
+        if (self.nv12_staging != null) return;
+        const dev = self.device orelse return error.NoDevice;
+        var sdesc: D3D11_TEXTURE2D_DESC = .{
+            .Width = self.out_w,
+            .Height = self.out_h,
+            .Format = com.DXGI_FORMAT_NV12,
+            .Usage = com.D3D11_USAGE_STAGING,
+            .BindFlags = 0,
+            .CPUAccessFlags = com.D3D11_CPU_ACCESS_READ,
+        };
+        const create_tex = com.slot(dev, 5, *const fn (*anyopaque, *const D3D11_TEXTURE2D_DESC, ?*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT);
+        if (!com.succeeded(create_tex(dev, &sdesc, null, &self.nv12_staging)) or self.nv12_staging == null) {
+            return error.CreateStagingFailed;
+        }
+    }
+
     fn readbackNv12(self: *Nv12GpuCtx, frame: *media_if.CaptureFrame) !void {
         const d3d_ctx = self.ctx orelse return error.NoContext;
         const staging = self.nv12_staging orelse return error.NoStaging;
@@ -518,6 +560,11 @@ pub const Duplicator = struct {
         defer com.release(tex);
 
         return try self.gpu.convertBgraToNv12(tex, self.src_w, self.src_h, want_cpu_copy, pts_us);
+    }
+
+    pub fn repeatNv12(self: *Duplicator, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
+        if (self.dupl == null) return null;
+        return try self.gpu.repeatFrame(want_cpu_copy, pts_us);
     }
 
     pub fn deinit(self: *Duplicator) void {

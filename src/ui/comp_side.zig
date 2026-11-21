@@ -437,6 +437,7 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 qa.mark(sr, "status-cam", .{});
                 const on = ctx.st.cam_on;
                 if (hb.clicked) ctx.act(.toggle_camera);
+                if (hb.right) @import("device_menu.zig").open(ctx, .cam, sr);
                 d.tip(ctx, sr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), hb.hovered);
                 if (tty) {
                     if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);
@@ -452,6 +453,7 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 qa.mark(sr, "status-share", .{});
                 const on = ctx.st.stream_on;
                 if (hb.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
+                if (hb.right) @import("device_menu.zig").open(ctx, .share, sr);
                 d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), hb.hovered);
                 if (tty) {
                     if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);

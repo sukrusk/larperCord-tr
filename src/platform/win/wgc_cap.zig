@@ -252,6 +252,19 @@ pub const Capturer = struct {
         return self;
     }
 
+    pub fn setCursorCapture(self: *Capturer, enabled: bool) void {
+        const sess = self.session orelse return;
+        const s2 = com.queryInterface(sess, anyopaque, &com.IID_IGraphicsCaptureSession2) orelse return;
+        defer com.release(s2);
+        const put_cursor = com.slot(s2, 7, *const fn (*anyopaque, u8) callconv(.winapi) HRESULT);
+        _ = put_cursor(s2, if (enabled) 1 else 0);
+    }
+
+    pub fn repeatNv12(self: *Capturer, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
+        if (self.pool == null) return null;
+        return try self.gpu.repeatFrame(want_cpu_copy, pts_us);
+    }
+
     pub fn tryAcquireNv12(self: *Capturer, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
         const pool = self.pool orelse return error.NotOpen;
         const try_next = com.slot(pool, 7, *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT);

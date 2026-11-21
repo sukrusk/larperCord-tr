@@ -28,6 +28,42 @@ const base_id: usize = 0x5E000;
 var mic_list: voz_audio.DeviceList = .{};
 var out_list: voz_audio.DeviceList = .{};
 var list_gen: u32 = 0;
+var cam_devs: [8]live_video.CamDevice = undefined;
+var cam_devs_n: usize = 0;
+var cam_probed: bool = false;
+var cam_test_on: bool = false;
+
+pub fn stopPreviewIfClosed(open: bool, is_voz_page: bool, in_call_cam: bool) void {
+    if (!cam_test_on) return;
+    if (in_call_cam) {
+        cam_test_on = false;
+        return;
+    }
+    if (!open or !is_voz_page) {
+        cam_test_on = false;
+        live_video.eng.stopCamera();
+    }
+}
+
+fn bitrateToIdx(mbps: u8) u8 {
+    return switch (mbps) {
+        0 => 0,
+        1...5 => 1,
+        6...11 => 2,
+        12...20 => 3,
+        else => 4,
+    };
+}
+
+fn idxToMbps(idx: u8) u8 {
+    return switch (idx) {
+        1 => 4,
+        2 => 8,
+        3 => 15,
+        4 => 25,
+        else => 0,
+    };
+}
 
 pub fn draw(p: anytype) void {
     const ctx = p.ctx;
@@ -85,21 +121,119 @@ pub fn draw(p: anytype) void {
     p.segmented(&.{ "720p", "1080p", "1440p", "4K" }, &s.video_res);
     p.segmented(&.{ "30 FPS", "60 FPS" }, &s.video_fps);
     p.segmented(&.{ "Auto", "H.264", "HEVC", "AV1" }, &s.video_codec);
+    var br_idx = bitrateToIdx(s.video_bitrate_mbps);
+    const prev_br_idx = br_idx;
+    p.segmented(&.{ i18n.tr("Otomatik", "Auto"), "4 Mbps", "8 Mbps", "15 Mbps", "25 Mbps" }, &br_idx);
+    if (br_idx != prev_br_idx) s.video_bitrate_mbps = idxToMbps(br_idx);
     p.toggle(
         i18n.tr("Aceleração em GPU (DX11/Media Foundation)", "GPU hardware acceleration (DX11/Media Foundation)"),
         i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
         &s.video_hw,
     );
+    p.toggle(
+        i18n.tr("Kamera ön izlemesini aynala", "Mirror camera self-preview"),
+        i18n.tr("Yalnızca kendi ekranındaki kamera ön izlemesini yatay çevirir.", "Horizontally flips your own camera preview locally."),
+        &s.video_cam_mirror,
+    );
+    p.toggle(
+        i18n.tr("Paylaşımda fare imlecini göster", "Show mouse cursor while sharing"),
+        i18n.tr("Pencere veya monitör paylaşımında fare imlecini videoya dahil eder.", "Includes mouse cursor when sharing windows or screens."),
+        &s.video_cursor,
+    );
+    p.toggle(
+        i18n.tr("Kendi yayınımı sahnede ön izle", "Preview own stream on stage"),
+        i18n.tr("Kapalıysa yalnızca karşıya gider, yerel ön izleme kopyası yapılmaz.", "When off, streams to peers without local preview readback."),
+        &s.video_self_preview,
+    );
     if (p.buttonSoft(i18n.tr("Detectar câmeras", "Detect cameras"))) {
-        var cams: [8]live_video.CamDevice = undefined;
-        const found = live_video.eng.listCameras(&cams);
-        if (found > 0) {
-            s.video_cam_idx = (s.video_cam_idx + 1) % @as(u8, @intCast(found));
-            const dev = &cams[s.video_cam_idx];
+        cam_devs_n = if (qa.on()) 0 else live_video.eng.listCameras(&cam_devs);
+        cam_probed = true;
+        if (cam_devs_n > 0) {
+            if (s.video_cam_idx >= cam_devs_n) s.video_cam_idx = 0;
+            const dev = &cam_devs[s.video_cam_idx];
             ctx.st.showToast(ctx.now_ms, false, "câmera #{d}: {s}", "camera #{d}: {s}", .{ s.video_cam_idx + 1, dev.slice() });
         } else {
             ctx.st.showToast(ctx.now_ms, false, "nenhuma webcam física encontrada (modo demo simulado disponível)", "no physical webcam found (demo preview available)", .{});
         }
+    }
+    if (!ctx.st.cam_on) {
+        p.sameLine();
+        if (p.button(if (cam_test_on) i18n.tr("Ön izlemeyi durdur", "Stop preview") else i18n.tr("Kamerayı test et", "Test camera"), cam_test_on)) {
+            if (cam_test_on) {
+                cam_test_on = false;
+                live_video.eng.stopCamera();
+            } else {
+                const tr_res = video_cfg.Resolution.fromByte(s.video_res);
+                const tr_fps: u8 = if (s.video_fps == 1) 60 else 30;
+                const cam_kbps: u32 = if (s.video_bitrate_mbps > 0) std.math.clamp(@as(u32, s.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
+                live_video.eng.configureCamera(cam_kbps, s.video_hw, true);
+                if (live_video.eng.startCamera(s.video_cam_idx, tr_res, tr_fps, true)) {
+                    cam_test_on = true;
+                } else {
+                    ctx.st.showToast(ctx.now_ms, true, "nenhuma câmera aberta (verifique a permissão)", "no camera opened (check permission)", .{});
+                }
+            }
+        }
+    }
+    if (cam_probed and cam_devs_n > 0) {
+        for (0..cam_devs_n) |ci| {
+            const cr: d.Rect = .{ .x = p.x, .y = p.y, .w = @min(p.w, 460), .h = 34 };
+            const ch = d.hit(ctx, p.id(), cr);
+            const sel = s.video_cam_idx == ci;
+            const rad = @max(ctx.th.radius, 6);
+            d.rect(p.dl, cr, if (sel) ctx.col(.selected) else if (ch.hovered) ctx.col(.hover) else ctx.col(.elevated), rad);
+            d.border(p.dl, cr, if (sel) ctx.col(.accent) else ctx.col(.border), rad, if (sel) 1.5 else 1);
+            var cb_name: [120]u8 = undefined;
+            const clbl = std.fmt.bufPrint(&cb_name, "{d}. {s}", .{ ci + 1, cam_devs[ci].slice() }) catch cam_devs[ci].slice();
+            _ = d.textClipped(p.dl, p.font(if (sel) .semibold else .medium), 13.5, cr.x + 12, d.centerY(cr, 13.5), ctx.col(.text), clbl, cr.w - 24);
+            if (ch.clicked) {
+                s.video_cam_idx = @intCast(ci);
+                if (ctx.st.cam_on) {
+                    ctx.act(.{ .switch_camera = s.video_cam_idx });
+                } else if (cam_test_on) {
+                    const tr_res = video_cfg.Resolution.fromByte(s.video_res);
+                    const tr_fps: u8 = if (s.video_fps == 1) 60 else 30;
+                    _ = live_video.eng.startCamera(s.video_cam_idx, tr_res, tr_fps, true);
+                }
+            }
+            p.y += 40;
+        }
+        p.y += 4;
+    }
+    if (cam_test_on or ctx.st.cam_on) {
+        anim.every(33);
+        const pw: f32 = @min(p.w, 360);
+        const ph: f32 = @round(pw * 9.0 / 16.0);
+        const pr: d.Rect = .{ .x = p.x, .y = p.y, .w = pw, .h = ph };
+        const rad = @max(ctx.th.radius, 8);
+        d.rect(p.dl, pr, d.Rgba.hex(0x0c0e12), rad);
+        d.border(p.dl, pr, ctx.col(.border), rad, 1);
+        if (live_video.eng.cam_slot.view(ctx.images.renderer)) |cv| {
+            const inner = pr.inset(3, 3);
+            const vw: f32 = @floatFromInt(cv.w);
+            const vh: f32 = @floatFromInt(cv.h);
+            const sc = @min(inner.w / vw, inner.h / vh);
+            const dw = vw * sc;
+            const dh = vh * sc;
+            const vx = inner.x + (inner.w - dw) / 2;
+            const vy = inner.y + (inner.h - dh) / 2;
+            const mir = s.video_cam_mirror;
+            c.ImDrawList_AddImageRounded(
+                p.dl,
+                cv.ref,
+                d.v(vx, vy),
+                d.v(vx + dw, vy + dh),
+                if (mir) d.v(1, 0) else d.v(0, 0),
+                if (mir) d.v(0, 1) else d.v(1, 1),
+                d.Rgba.white.u(),
+                6,
+                0,
+            );
+        } else {
+            const wt = i18n.tr("Kamera başlatılıyor…", "Starting camera…");
+            _ = d.textClipped(p.dl, p.font(.regular), 13, pr.x + 14, d.centerY(pr, 13), ctx.col(.muted), wt, pr.w - 28);
+        }
+        p.y += ph + 12;
     }
     var cfg_b: [160]u8 = undefined;
     const res_enum = video_cfg.Resolution.fromByte(s.video_res);

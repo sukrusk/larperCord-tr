@@ -13,7 +13,7 @@ pub const Settings = @import("settings_state.zig").Settings;
 pub const MenuKind = enum { message, user, channel, guild, status, voice_move, thread_delete, guild_leave, plugin_choices, notif, block_confirm, group_leave, pet, tabs };
 
 /// O que o menu rápido de dispositivos mostra (ui/device_menu.zig).
-pub const DeviceMenu = enum { mic, out, both };
+pub const DeviceMenu = enum { mic, out, both, cam, share };
 
 pub const Popup = union(enum) {
     none,
@@ -218,6 +218,7 @@ pub const State = struct {
     stream_on: bool = false,
     stream_cfg: video_cfg.StreamConfig = .{},
     watch_owner: Id = 0,
+    spotlight_cam: Id = 0,
     spotlight_fullscreen: bool = false,
     remote_ctrl_peer: Id = 0,
     remote_ctrl_status: ev.RemoteCtrlStatus = .idle,

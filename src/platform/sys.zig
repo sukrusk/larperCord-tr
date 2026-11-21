@@ -636,6 +636,10 @@ pub fn credDelete(target: [*:0]const u8) void {
     if (windows) _ = c.CredDeleteA(target, c.CRED_TYPE_GENERIC, 0);
 }
 
+pub fn setDpiSplitMode(mode: u8) void {
+    if (build_options.tls_chrome) c.larper_dpi_set_mode(@intCast(mode));
+}
+
 /// No Windows confia nos certificados do sistema (não há pacote de CAs junto). No
 /// Linux, cada família de distros guarda o pacote num lugar, e o caminho embutido no
 /// OpenSSL do binário portátil só valeria na distro onde ele foi compilado.

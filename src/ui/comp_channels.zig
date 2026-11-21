@@ -756,9 +756,13 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         qa.mark(view_r, "voice-view", .{});
         if (d.hitRaw(ctx, view_r).clicked) ctx.act(.{ .show_call = vc });
         qa.mark(cam_r, "voice-cam", .{});
-        if (d.hitRaw(ctx, cam_r).clicked) ctx.act(.toggle_camera);
+        const cr_hit = d.hitRaw(ctx, cam_r);
+        if (cr_hit.clicked) ctx.act(.toggle_camera);
+        if (cr_hit.right) devices.open(ctx, .cam, cam_r);
         qa.mark(shr_r, "voice-share", .{});
-        if (d.hitRaw(ctx, shr_r).clicked) ctx.act(if (ctx.st.stream_on) .stop_screen_share else .open_stream_picker);
+        const sr_hit = d.hitRaw(ctx, shr_r);
+        if (sr_hit.clicked) ctx.act(if (ctx.st.stream_on) .stop_screen_share else .open_stream_picker);
+        if (sr_hit.right) devices.open(ctx, .share, shr_r);
         qa.mark(leave_r, "hangup", .{});
         if (d.hitRaw(ctx, leave_r).clicked) ctx.act(.leave_voice);
         qa.mark(mix_r, "voice-mixer", .{});
@@ -854,6 +858,7 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         icons.camera(ctx.dl, cr.x + cr.w / 2, cr.y + cr.h / 2, cink.u(), !on);
         d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch_hit.hovered);
         if (ch_hit.clicked) ctx.act(.toggle_camera);
+        if (ch_hit.right) devices.open(ctx, .cam, cr);
     }
     {
         const sh_hit = d.hitRaw(ctx, sr);
@@ -868,6 +873,7 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         _ = d.textClipped(ctx.dl, fam.get(.semibold), 10, sr.x + 22, d.centerY(sr, 10), sink, slbl, sr.w - 25);
         d.tip(ctx, sr, if (son) i18n.tr("Parar compartilhamento de tela", "Stop sharing screen") else i18n.tr("Compartilhar tela / Go Live 4K", "Share screen / Go Live 4K"), sh_hit.hovered);
         if (sh_hit.clicked) ctx.act(if (son) .stop_screen_share else .open_stream_picker);
+        if (sh_hit.right) devices.open(ctx, .share, sr);
     }
 }
 

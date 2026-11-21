@@ -56,5 +56,6 @@ const unsigned char *larper_gif_next(larper_gif *it, int *w, int *h, int *delay_
 void larper_gif_close(larper_gif *it);
 /* O aperto de mão TLS do Chrome no SSL_CTX do curl (src/platform/tls_chrome.c). */
 int larper_tls_chrome(void *ssl_ctx, int h1_only);
+void larper_dpi_set_mode(int mode);
 void larper_tls_alps_everywhere(void);
 int larper_tls_alps_refused(void);

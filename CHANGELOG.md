@@ -1,5 +1,19 @@
 # What changed in each version
 
+## 0.7.0
+
+**Network, DoH & GoodbyeDPI**
+- Added built-in Encrypted DNS (DoH via literal `1.1.1.1` / `8.8.8.8` -> `CURLOPT_RESOLVE`) and driverless OpenSSL TLS `ClientHello` SNI splitting (`tls_chrome.c` filter BIO preserving Chrome 156 JA4) — no admin rights needed.
+- Routed `voice.zig` (`*.discord.media` WSS) through proxy, DoH and TLS SNI splitting alongside REST, Gateway, CDN media and updater so voice, camera and screen sharing work reliably across restricted networks.
+- Integrated optional official Windows `ValdikSS/GoodbyeDPI v0.2.3rc3-2` manager in Settings → Network (`SHA-256` verified zip download into `<cache>/larpercord/dpi/`), with Turkey DPI presets, UAC start/stop and startup toggle.
+- Added compact DoH and driverless TLS SNI split controls directly inside the Login Network/Proxy drawer so first-time sign-in works without external tools.
+
+**Screen Share & Camera**
+- Fixed static-desktop capture starvation by repeating the last NV12/VRAM frame on keyframe requests and 250 ms heartbeats, halved async Media Foundation blocking waits, expanded RTP TX pacing queues to 512 slots, and prioritized low-latency software decode for `<=1080p` H.264 streams.
+- Upgraded the stream picker with a target Refresh button, up to 6 multi-monitor tiles, explicit Mbps bitrate selector (`Auto`, `4M`, `8M`, `15M`, `25M`), WGC mouse cursor capture toggle (`IGraphicsCaptureSession2`), self-preview toggle and scrollbar indicator.
+- Upgraded Voice & Video settings with physical camera picker, live NV12 camera test preview, local mirror toggle (`video_cam_mirror`), shared bitrate control across camera and screen share, and `hw_preferred` encoder/decoder routing.
+- Added camera tile expand-to-spotlight, right-click quick menus on Camera and Screen Share buttons, plus Fit/Fill zoom, Force Keyframe (PLI), Switch Source and Stop controls in the stream stage HUD.
+
 ## 0.6.9
 
 **Camera, screen share & official Discord compatibility**

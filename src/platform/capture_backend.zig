@@ -55,6 +55,24 @@ pub const ScreenSource = union(enum) {
         };
     }
 
+    pub fn repeatNv12(self: *ScreenSource, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
+        return switch (self.*) {
+            .dxgi => |*d| try d.repeatNv12(want_cpu_copy, pts_us),
+            .wgc => |*w| if (comptime is_win) try w.repeatNv12(want_cpu_copy, pts_us) else null,
+        };
+    }
+
+    pub fn setCursorCapture(self: *ScreenSource, enabled: bool) void {
+        if (comptime !is_win) {
+            _ = .{ self, enabled };
+            return;
+        }
+        switch (self.*) {
+            .dxgi => {},
+            .wgc => |*w| w.setCursorCapture(enabled),
+        }
+    }
+
     pub fn d3d11Device(self: *const ScreenSource) ?*anyopaque {
         if (comptime !is_win) return null;
         return switch (self.*) {

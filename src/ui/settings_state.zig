@@ -331,10 +331,20 @@ pub const Settings = struct {
     video_fps: u8 = 1,
     /// 0=Auto, 1=H.264, 2=HEVC, 3=AV1.
     video_codec: u8 = 0,
-    /// Taxa alvo em Mbps (4..45).
-    video_bitrate_mbps: u8 = 18,
+    /// Taxa alvo em Mbps (0=Auto, 4..45).
+    video_bitrate_mbps: u8 = 0,
     video_hw: bool = true,
     video_cam_idx: u8 = 0,
+    video_cam_mirror: bool = true,
+    video_cursor: bool = true,
+    video_self_preview: bool = true,
+    /// DNS-over-HTTPS no app (0=Desligado, 1=Cloudflare 1.1.1.1, 2=Google 8.8.8.8).
+    dpi_doh: u8 = 1,
+    /// Divisão TLS SNI sem driver (0=Desligado, 1=Akıllı/Smart TCP, 2=Sert Record+TCP).
+    dpi_split: u8 = 1,
+    /// Preset GoodbyeDPI no Windows (0=TR önerilen, 1=Superonline/Sert, 2=Sadece DPI, 3=Evrensel).
+    goodbyedpi_preset: u8 = 0,
+    goodbyedpi_auto: bool = false,
     /// Controle remoto estilo AnyDesk: 0=Desligado, 1=Só mouse, 2=Mouse+Teclado (sempre pede confirmação).
     remote_ctrl_allow: u8 = 2,
 
@@ -680,6 +690,35 @@ test "configurações de voz vão e voltam (volume acima de 3x e nome com acento
     try std.testing.expectEqual(@as(usize, 0), fresh.voice_mic.slice().len);
     try std.testing.expect(fresh.voice_highpass and fresh.voice_sounds and !fresh.voice_ptt);
     try std.testing.expectEqual(@as(u8, 1), fresh.voice_denoise);
+}
+
+test "DPI, câmara aynalama e codec de vídeo vão e voltam pelo KDL" {
+    const kdl = @import("../theme/kdl.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s: Settings = .{};
+    s.video_bitrate_mbps = 15;
+    s.video_cam_mirror = false;
+    s.video_cursor = false;
+    s.video_self_preview = false;
+    s.dpi_doh = 2;
+    s.dpi_split = 2;
+    s.goodbyedpi_preset = 1;
+    s.goodbyedpi_auto = true;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try write(&s, "vidro", &out, std.testing.allocator);
+    const nodes = try kdl.parse(arena.allocator(), out.items, null);
+    var back: Settings = .{};
+    apply(&back, &nodes[0]);
+    try std.testing.expectEqual(@as(u8, 15), back.video_bitrate_mbps);
+    try std.testing.expect(!back.video_cam_mirror);
+    try std.testing.expect(!back.video_cursor);
+    try std.testing.expect(!back.video_self_preview);
+    try std.testing.expectEqual(@as(u8, 2), back.dpi_doh);
+    try std.testing.expectEqual(@as(u8, 2), back.dpi_split);
+    try std.testing.expectEqual(@as(u8, 1), back.goodbyedpi_preset);
+    try std.testing.expect(back.goodbyedpi_auto);
 }
 
 test "texto copiado dele mesmo não se apaga" {

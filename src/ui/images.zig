@@ -18,6 +18,7 @@ const proxiedUrl = media_url.proxiedUrl;
 const apng = @import("apng.zig");
 const ffmpeg = @import("../platform/ffmpeg.zig");
 const proxy = @import("../net/proxy.zig");
+const dpi = @import("../net/dpi_bypass.zig");
 const janela = @import("../core/janela.zig");
 const quadros = @import("../core/gif_quadros.zig");
 const gif_stream = @import("gif_stream.zig");
@@ -948,7 +949,10 @@ pub fn fetchEx(curl: *?*c.CURL, url: [:0]const u8, sink: Sink, stop: *std.atomic
         _ = c.curl_easy_setopt(h, c.CURLOPT_ACCEPT_ENCODING, @import("../platform/sys.zig").acceptEncoding());
         // Proxy das configurações (mídia de fora, ou tudo).
         var pbuf: proxy.Buf = undefined;
-        if (proxy.forUrl(&pbuf, cur_url)) |p| _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+        const px = proxy.forUrl(&pbuf, cur_url);
+        if (px) |p| _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+        var rg = dpi.ResolveGuard.attach(h, cur_url, px != null);
+        defer rg.detach(h);
         // Fechar o app interrompe o download na hora.
         _ = c.curl_easy_setopt(h, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
         _ = c.curl_easy_setopt(h, c.CURLOPT_XFERINFOFUNCTION, abortCb);
