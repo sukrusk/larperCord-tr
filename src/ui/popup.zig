@@ -436,6 +436,10 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
                 }
                 add(&items, &n, .{ .label = "Pedir controle (Mouse)", .en = "Request Control (Mouse)", .id = 31 });
                 add(&items, &n, .{ .label = "Pedir controle completo", .en = "Request Full Control", .id = 32 });
+            } else if (id != ctx.store.me and (ctx.store.streamOf(id) != null or ctx.store.voiceFlags(id).self_stream)) {
+                if (ctx.store.voiceChannelOf(id, ctx.st.guild) != 0) {
+                    add(&items, &n, .{ .label = "Assistir transmissão", .en = "Watch Stream", .id = 33, .sep = true });
+                }
             }
             // Amizade, ignorar e bloquear vão para a conta (ui/conta_menu.zig).
             const conta_at = n;
@@ -874,6 +878,10 @@ fn choose(ctx: *d.Ctx, kind: state.MenuKind, id: Id, item: u8, r: d.Rect) void {
         28 => st.popup = .{ .menu = .{ .kind = .voice_move, .id = id, .x = r.x + r.w - 8, .y = r.y + r.h - 70 } },
         29 => if (movable(ctx, id)) |cs| ctx.act(.{ .move_member = .{ .guild = cs.info.guild, .user = id, .channel = null } }),
         30 => ctx.act(.{ .watch_stream = id }),
+        33 => {
+            const vch = ctx.store.voiceChannelOf(id, st.guild);
+            if (vch != 0) ctx.act(.{ .watch_member_stream = .{ .channel = vch, .owner = id } });
+        },
         31 => ctx.act(.{ .request_remote_ctrl = .{ .peer = id, .perm = .mouse_only } }),
         32 => ctx.act(.{ .request_remote_ctrl = .{ .peer = id, .perm = .full } }),
         40, 60 => ctx.act(.{ .mark_read = id }),

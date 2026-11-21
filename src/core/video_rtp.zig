@@ -9,6 +9,7 @@
 //! Foco em memória mínima: apenas um buffer reutilizável de quadro comprimido
 //! (sem anéis de quadros RGBA em RAM).
 const std = @import("std");
+const video_cfg = @import("video_cfg.zig");
 
 /// Payload RTP máximo por datagrama UDP (abaixo de MTU 1500 menos cabeçalhos IP/UDP/RTP/AEAD).
 pub const max_rtp_payload: usize = 1140;
@@ -161,11 +162,18 @@ pub const FrameAssembler = struct {
     last_seq: u16 = 0,
     broken: bool = false,
     need_pli: bool = false,
+    /// Verdadeiro se um quadro anterior incompleto foi substituído antes do marker.
+    abandoned: bool = false,
+    /// Em codecs baseados em cabeçalho por quadro (VP8/VP9/AV1), indica flag de keyframe do cabeçalho RTP.
+    frame_key_hint: bool = false,
     /// Bits de pacotes faltantes relativos a `first_seq` (janela até 512 pacotes).
     seen: [64]u8 = @splat(0),
     /// Em FU-A, se já gravamos o cabeçalho da NAL atual.
     in_fua: bool = false,
     fua_nal: u8 = 0,
+    /// Em AV1 RTP, estado de OBU fragmentado entre pacotes (`Y=1` -> `Z=1`).
+    av1_in_obu: bool = false,
+    av1_obu: std.ArrayList(u8) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) FrameAssembler {
         return .{ .gpa = gpa };
@@ -174,6 +182,7 @@ pub const FrameAssembler = struct {
     pub fn deinit(a: *FrameAssembler) void {
         if (a.reorder) |rb| a.gpa.free(rb);
         a.reorder = null;
+        a.av1_obu.deinit(a.gpa);
         a.buf.deinit(a.gpa);
     }
 
@@ -185,12 +194,15 @@ pub const FrameAssembler = struct {
 
     pub fn reset(a: *FrameAssembler) void {
         a.buf.clearRetainingCapacity();
+        a.av1_obu.clearRetainingCapacity();
         a.clearReorder();
         a.active = false;
         a.await_start = false;
         a.base_seq = 0;
         a.broken = false;
         a.in_fua = false;
+        a.av1_in_obu = false;
+        a.frame_key_hint = false;
         @memset(&a.seen, 0);
     }
 
@@ -198,12 +210,22 @@ pub const FrameAssembler = struct {
     pub fn shrinkToZero(a: *FrameAssembler) void {
         if (a.reorder) |rb| a.gpa.free(rb);
         a.reorder = null;
+        a.av1_obu.clearAndFree(a.gpa);
         a.buf.clearAndFree(a.gpa);
         a.active = false;
         a.await_start = false;
         a.base_seq = 0;
         a.broken = false;
         a.in_fua = false;
+        a.av1_in_obu = false;
+        a.abandoned = false;
+        a.frame_key_hint = false;
+    }
+
+    pub fn takeAbandoned(a: *FrameAssembler) bool {
+        const had = a.abandoned;
+        a.abandoned = false;
+        return had;
     }
 
     pub const PushResult = union(enum) {
@@ -214,8 +236,15 @@ pub const FrameAssembler = struct {
         dropped: struct { need_pli: bool },
     };
 
-    fn isFuaContinuation(payload: []const u8) bool {
-        return payload.len >= 2 and (payload[0] & 0x1F) == 28 and (payload[1] & 0x80) == 0;
+    fn isContinuationPacket(codec: video_cfg.Codec, payload: []const u8) bool {
+        if (payload.len == 0) return false;
+        return switch (codec) {
+            .auto, .h264 => payload.len >= 2 and (payload[0] & 0x1F) == 28 and (payload[1] & 0x80) == 0,
+            .vp8 => (payload[0] & 0x10) == 0, // S=0 (não é início de partição)
+            .vp9 => (payload[0] & 0x08) == 0, // B=0 (não é início de quadro)
+            .av1 => (payload[0] & 0x80) != 0, // Z=1 (continuação de OBU anterior)
+            .hevc => false,
+        };
     }
 
     fn stashReorder(a: *FrameAssembler, seq: u16, marker: bool, payload: []const u8) bool {
@@ -249,7 +278,7 @@ pub const FrameAssembler = struct {
         return false;
     }
 
-    fn drainReorder(a: *FrameAssembler, out_marker: *bool) bool {
+    fn drainReorder(a: *FrameAssembler, codec: video_cfg.Codec, out_marker: *bool) bool {
         const rb = a.reorder orelse return true;
         while (true) {
             const want = a.last_seq +% 1;
@@ -264,7 +293,7 @@ pub const FrameAssembler = struct {
             pkt.active = false;
             a.last_seq = want;
             a.markSeq(want);
-            if (!a.appendH264Payload(pkt.data[0..pkt.len])) return false;
+            if (!a.appendCodecPayload(codec, pkt.data[0..pkt.len], pkt.marker)) return false;
             if (pkt.marker) {
                 out_marker.* = true;
                 return true;
@@ -274,6 +303,11 @@ pub const FrameAssembler = struct {
 
     /// Recebe payload RTP H.264 (RFC 6184) e remonta em Annex-B (`00 00 00 01 ...`).
     pub fn pushH264(a: *FrameAssembler, seq: u16, ts: u32, marker: bool, payload: []const u8) PushResult {
+        return a.pushPacket(.h264, seq, ts, marker, payload);
+    }
+
+    /// Recebe payload RTP de H.264 / VP8 / VP9 / AV1 / HEVC com reordenação e detecção de perdas.
+    pub fn pushPacket(a: *FrameAssembler, codec: video_cfg.Codec, seq: u16, ts: u32, marker: bool, payload: []const u8) PushResult {
         if (payload.len == 0) return .pending;
 
         if (!a.active or ts != a.cur_ts) {
@@ -281,14 +315,18 @@ pub const FrameAssembler = struct {
                 const ts_back = a.cur_ts -% ts;
                 if (ts_back > 0 and ts_back < 90_000 * 10) return .pending;
             }
-            const was_broken = a.active and (a.broken or a.await_start);
+            // Qualquer quadro anterior ainda ativo que não recebeu `marker` foi truncado por perda!
+            const was_incomplete = a.active;
             a.reset();
             a.active = true;
             a.cur_ts = ts;
             a.first_seq = seq;
             a.last_seq = seq;
-            if (was_broken) a.need_pli = true;
-            if (isFuaContinuation(payload)) {
+            if (was_incomplete) {
+                a.need_pli = true;
+                a.abandoned = true;
+            }
+            if (isContinuationPacket(codec, payload)) {
                 a.await_start = true;
                 a.base_seq = seq;
                 if (!a.stashReorder(seq, marker, payload)) {
@@ -301,7 +339,7 @@ pub const FrameAssembler = struct {
         } else if (a.await_start) {
             const back = a.base_seq -% seq;
             if (back > 0 and back <= reorder_cap) {
-                if (isFuaContinuation(payload)) {
+                if (isContinuationPacket(codec, payload)) {
                     a.base_seq = seq;
                     if (!a.stashReorder(seq, marker, payload)) {
                         a.broken = true;
@@ -342,7 +380,7 @@ pub const FrameAssembler = struct {
                     }
                     if (all_present) {
                         var drained_marker = false;
-                        if (!a.drainReorder(&drained_marker) or !a.appendH264Payload(payload)) {
+                        if (!a.drainReorder(codec, &drained_marker) or !a.appendCodecPayload(codec, payload, marker)) {
                             a.reset();
                             return .{ .dropped = .{ .need_pli = true } };
                         }
@@ -354,6 +392,7 @@ pub const FrameAssembler = struct {
                         }
                         a.active = false;
                         a.in_fua = false;
+                        a.av1_in_obu = false;
                         return .{ .frame = a.buf.items };
                     }
                 }
@@ -376,7 +415,7 @@ pub const FrameAssembler = struct {
         }
 
         var done_marker = marker;
-        if (!a.appendH264Payload(payload) or !a.drainReorder(&done_marker)) {
+        if (!a.appendCodecPayload(codec, payload, marker) or !a.drainReorder(codec, &done_marker)) {
             a.broken = true;
             a.need_pli = true;
             if (done_marker) {
@@ -394,6 +433,7 @@ pub const FrameAssembler = struct {
         }
         a.active = false;
         a.in_fua = false;
+        a.av1_in_obu = false;
         return .{ .frame = a.buf.items };
     }
 
@@ -412,6 +452,16 @@ pub const FrameAssembler = struct {
         if (a.buf.items.len + bytes.len > max_frame_bytes) return false;
         a.buf.appendSlice(a.gpa, bytes) catch return false;
         return true;
+    }
+
+    fn appendCodecPayload(a: *FrameAssembler, codec: video_cfg.Codec, p: []const u8, marker: bool) bool {
+        return switch (codec) {
+            .auto, .h264 => a.appendH264Payload(p),
+            .vp8 => a.appendVp8Payload(p),
+            .vp9 => a.appendVp9Payload(p),
+            .av1 => a.appendAv1Payload(p, marker),
+            .hevc => a.appendStartCode() and a.appendBytes(p),
+        };
     }
 
     fn appendH264Payload(a: *FrameAssembler, p: []const u8) bool {
@@ -453,7 +503,250 @@ pub const FrameAssembler = struct {
         }
         return false;
     }
+
+    /// RFC 7741 VP8 RTP payload descriptor stripping.
+    fn appendVp8Payload(a: *FrameAssembler, p: []const u8) bool {
+        if (p.len < 1) return false;
+        const b0 = p[0];
+        var off: usize = 1;
+        if ((b0 & 0x80) != 0) { // X
+            if (off >= p.len) return false;
+            const x = p[off];
+            off += 1;
+            if ((x & 0x80) != 0) { // I (PictureID)
+                if (off >= p.len) return false;
+                const m = (p[off] & 0x80) != 0;
+                off += if (m) @as(usize, 2) else 1;
+            }
+            if ((x & 0x40) != 0) off += 1; // L (TL0PICIDX)
+            if ((x & 0x30) != 0) off += 1; // T or K (TID/KEYIDX)
+        }
+        if (off > p.len) return false;
+        const pay = p[off..];
+        if (pay.len == 0) return true;
+        if ((b0 & 0x10) != 0 and (b0 & 0x07) == 0 and a.buf.items.len == 0 and (pay[0] & 0x01) == 0) {
+            a.frame_key_hint = true;
+        }
+        return a.appendBytes(pay);
+    }
+
+    /// RFC 9628 VP9 RTP payload descriptor stripping.
+    fn appendVp9Payload(a: *FrameAssembler, p: []const u8) bool {
+        if (p.len < 1) return false;
+        const b0 = p[0];
+        const i_bit = (b0 & 0x80) != 0;
+        const p_bit = (b0 & 0x40) != 0;
+        const l_bit = (b0 & 0x20) != 0;
+        const f_bit = (b0 & 0x10) != 0;
+        const b_bit = (b0 & 0x08) != 0;
+        const v_bit = (b0 & 0x02) != 0;
+        var off: usize = 1;
+        if (i_bit) {
+            if (off >= p.len) return false;
+            const m = (p[off] & 0x80) != 0;
+            off += if (m) @as(usize, 2) else 1;
+        }
+        if (l_bit) {
+            off += 1; // Layer indices
+            if (!f_bit) off += 1; // Non-flexible mode has TL0PICIDX
+        }
+        if (f_bit and p_bit) {
+            // Flexible mode reference indices (N bit is LSB)
+            var guard: u8 = 0;
+            while (off < p.len and guard < 8) : (guard += 1) {
+                const more = (p[off] & 0x01) != 0;
+                off += 1;
+                if (!more) break;
+            }
+        }
+        if (v_bit) {
+            if (off >= p.len) return false;
+            const ss = p[off];
+            off += 1;
+            const n_s: usize = ((ss >> 5) & 7) + 1;
+            const y_bit = (ss & 0x10) != 0;
+            const g_bit = (ss & 0x08) != 0;
+            if (y_bit) off += 4 * n_s;
+            if (g_bit) {
+                if (off >= p.len) return false;
+                const n_g: usize = p[off];
+                off += 1;
+                for (0..n_g) |_| {
+                    if (off >= p.len) return false;
+                    const r: usize = (p[off] >> 2) & 3;
+                    off += 1 + r;
+                }
+            }
+        }
+        if (off > p.len) return false;
+        if (b_bit and !p_bit) a.frame_key_hint = true;
+        return a.appendBytes(p[off..]);
+    }
+
+    fn appendAv1Payload(a: *FrameAssembler, p: []const u8, marker: bool) bool {
+        if (p.len < 1) return false;
+        const b0 = p[0];
+        const z_bit = (b0 & 0x80) != 0;
+        const y_bit = (b0 & 0x40) != 0;
+        const w_cnt: u8 = (b0 >> 4) & 3;
+        if ((b0 & 0x08) != 0) a.frame_key_hint = true;
+        var off: usize = 1;
+        var elem_idx: u8 = 0;
+        while (off < p.len) {
+            const has_len = (w_cnt == 0) or (elem_idx + 1 < w_cnt);
+            var elem_len: usize = 0;
+            if (has_len) {
+                var shift: u6 = 0;
+                while (off < p.len and shift < 28) {
+                    const byte = p[off];
+                    off += 1;
+                    elem_len |= @as(usize, byte & 0x7F) << shift;
+                    if ((byte & 0x80) == 0) break;
+                    shift += 7;
+                } else return false;
+            } else {
+                elem_len = p.len - off;
+            }
+            if (off + elem_len > p.len) return false;
+            const frag = p[off .. off + elem_len];
+            off += elem_len;
+
+            const is_last_in_pkt = if (w_cnt == 0) (off >= p.len) else (elem_idx + 1 >= w_cnt);
+            const continues_next = is_last_in_pkt and y_bit;
+            const is_cont_prev = (elem_idx == 0) and z_bit;
+
+            if (!is_cont_prev) {
+                if (a.av1_in_obu and a.av1_obu.items.len > 0) {
+                    if (!a.flushAv1Obu(false)) return false;
+                }
+                a.av1_obu.clearRetainingCapacity();
+                a.av1_in_obu = false;
+            }
+            if (a.buf.items.len + a.av1_obu.items.len + frag.len > max_frame_bytes) return false;
+            a.av1_obu.appendSlice(a.gpa, frag) catch return false;
+
+            if (continues_next) {
+                a.av1_in_obu = true;
+            } else {
+                a.av1_in_obu = false;
+                const final_obu_of_frame = is_last_in_pkt and marker;
+                if (!a.flushAv1Obu(final_obu_of_frame)) return false;
+                a.av1_obu.clearRetainingCapacity();
+            }
+            elem_idx +|= 1;
+            if (w_cnt != 0 and elem_idx >= w_cnt) break;
+        }
+        return true;
+    }
+
+    fn flushAv1Obu(a: *FrameAssembler, is_frame_end: bool) bool {
+        const obu = a.av1_obu.items;
+        if (obu.len == 0) return true;
+        const hdr = obu[0];
+        const has_ext = (hdr & 0x04) != 0;
+        const has_size = (hdr & 0x02) != 0;
+        const hdr_len: usize = if (has_ext) 2 else 1;
+        if (obu.len < hdr_len) return false;
+        const obu_type = (hdr >> 3) & 0x0F;
+        if (obu_type == 1) a.frame_key_hint = true; // OBU_SEQUENCE_HEADER
+
+        // DAVE remove obu_size apenas no último OBU para anexar 0xFA 0xFA; OBUs intermediários precisam do tamanho.
+        if (has_size or is_frame_end) {
+            return a.appendBytes(obu);
+        }
+        const payload = obu[hdr_len..];
+        var prefix: [10]u8 = undefined;
+        prefix[0] = hdr | 0x02;
+        if (has_ext) prefix[1] = obu[1];
+        var p_len = hdr_len;
+        var v = payload.len;
+        while (true) {
+            var b: u8 = @intCast(v & 0x7F);
+            v >>= 7;
+            if (v != 0) b |= 0x80;
+            prefix[p_len] = b;
+            p_len += 1;
+            if (v == 0) break;
+        }
+        return a.appendBytes(prefix[0..p_len]) and a.appendBytes(payload);
+    }
 };
+
+/// Desencapsula pacote RTX (RFC 4588): 2 bytes de sequence number original + payload real.
+pub fn unwrapRtx(pkt_payload: []const u8) ?struct { orig_seq: u16, orig_payload: []const u8 } {
+    if (pkt_payload.len <= 2) return null;
+    return .{
+        .orig_seq = std.mem.readInt(u16, pkt_payload[0..2], .big),
+        .orig_payload = pkt_payload[2..],
+    };
+}
+
+/// Detecta se o Access Unit decodificado/desencriptado inicia um keyframe válido do codec.
+pub fn isKeyframe(codec: video_cfg.Codec, au: []const u8, frame_key_hint: bool) bool {
+    if (au.len == 0) return false;
+    switch (codec) {
+        .auto, .h264 => {
+            var nals: [32][]const u8 = undefined;
+            const count = splitAnnexBNals(au, &nals);
+            for (nals[0..count]) |nal| {
+                if (nal.len == 0) continue;
+                const nt = nal[0] & 0x1F;
+                if (nt == 5 or nt == 7) return true;
+            }
+            return false;
+        },
+        .hevc => {
+            var nals: [32][]const u8 = undefined;
+            const count = splitAnnexBNals(au, &nals);
+            for (nals[0..count]) |nal| {
+                if (nal.len == 0) continue;
+                const nt = (nal[0] >> 1) & 0x3F;
+                if (nt >= 16 and nt <= 21) return true;
+                if (nt == 32 or nt == 33) return true;
+            }
+            return false;
+        },
+        .vp8 => return (au[0] & 0x01) == 0,
+        .vp9 => {
+            if (frame_key_hint) return true;
+            if ((au[0] >> 6) == 2) {
+                const prof = ((au[0] >> 4) & 1) | ((au[0] >> 5) & 2);
+                if (prof == 3) {
+                    const show_ex = (au[0] & 0x04) != 0;
+                    return !show_ex and (au[0] & 0x02) == 0;
+                }
+                const show_ex = (au[0] & 0x08) != 0;
+                return !show_ex and (au[0] & 0x04) == 0;
+            }
+            return false;
+        },
+        .av1 => {
+            if (frame_key_hint) return true;
+            var off: usize = 0;
+            var checked: usize = 0;
+            while (off < au.len and checked < 8) : (checked += 1) {
+                const hdr = au[off];
+                const obu_type = (hdr >> 3) & 0x0F;
+                if (obu_type == 1) return true; // SEQUENCE_HEADER
+                const has_ext = (hdr & 0x04) != 0;
+                const has_size = (hdr & 0x02) != 0;
+                off += if (has_ext) @as(usize, 2) else 1;
+                if (!has_size or off >= au.len) break;
+                var sz: usize = 0;
+                var sh: u6 = 0;
+                while (off < au.len and sh < 28) {
+                    const b = au[off];
+                    off += 1;
+                    sz |= @as(usize, b & 0x7F) << sh;
+                    if ((b & 0x80) == 0) break;
+                    sh += 7;
+                }
+                off += sz;
+            }
+            return false;
+        },
+    }
+}
 
 /// Monta um pacote RTCP PLI (Payload-Specific Feedback, FMT=1, PT=206) de 12 bytes.
 pub fn buildRtcpPli(out: *[12]u8, sender_ssrc: u32, media_ssrc: u32) void {
@@ -665,4 +958,59 @@ test "extensões RTP Discord 0xBEDE e RTCP SR" {
     try t.expectEqual(@as(u8, 200), sr[1]);
     try t.expectEqual(@as(u32, 0xAABBCCDD), std.mem.readInt(u32, sr[4..8], .big));
     try t.expectEqual(@as(u32, 10), std.mem.readInt(u32, sr[20..24], .big));
+}
+
+test "quadro truncado sem marker sinaliza takeAbandoned para reset de keyframe" {
+    var asm_dec = FrameAssembler.init(t.allocator);
+    defer asm_dec.deinit();
+
+    // Quadro ts=1000 inicia FU-A sem marker (marker foi perdido pela rede).
+    try t.expectEqual(FrameAssembler.PushResult.pending, asm_dec.pushH264(1, 1000, false, &[_]u8{ 0x7C, 0x81, 0xAA }));
+    try t.expect(!asm_dec.takeAbandoned());
+
+    // Quadro seguinte ts=4000 chega completo: caller precisa saber que ts=1000 caiu!
+    const f2 = asm_dec.pushH264(2, 4000, true, &[_]u8{ 0x41, 0xBB });
+    try t.expect(f2 == .frame);
+    try t.expect(asm_dec.takeAbandoned());
+    try t.expect(!asm_dec.takeAbandoned());
+}
+
+test "VP8, VP9 e AV1 RTP depacketization, keyframe e unwrapRtx" {
+    var asm_dec = FrameAssembler.init(t.allocator);
+    defer asm_dec.deinit();
+
+    // VP8 keyframe fragmentado (X=1, I=1(2B), S=1 PID=0 -> keyframe byte0 & 1 == 0)
+    const vp8_p1 = [_]u8{ 0x90, 0x80, 0x80, 0x01, 0x10, 0x00, 0x00, 0x9D, 0x01, 0x2A };
+    const vp8_p2 = [_]u8{ 0x80, 0x80, 0x80, 0x02, 0xAA, 0xBB };
+    try t.expectEqual(FrameAssembler.PushResult.pending, asm_dec.pushPacket(.vp8, 10, 1000, false, &vp8_p1));
+    const vp8_res = asm_dec.pushPacket(.vp8, 11, 1000, true, &vp8_p2);
+    try t.expect(vp8_res == .frame);
+    try t.expect(isKeyframe(.vp8, vp8_res.frame, asm_dec.frame_key_hint));
+    try t.expectEqualSlices(u8, &[_]u8{ 0x10, 0x00, 0x00, 0x9D, 0x01, 0x2A, 0xAA, 0xBB }, vp8_res.frame);
+
+    // VP9 delta (I=1(1B), P=1, B=1, E=1) vs keyframe (P=0, B=1)
+    const vp9_k = [_]u8{ 0x8C, 0x05, 0x82, 0x49, 0x83, 0x42 };
+    const vp9_res = asm_dec.pushPacket(.vp9, 12, 2000, true, &vp9_k);
+    try t.expect(vp9_res == .frame);
+    try t.expect(isKeyframe(.vp9, vp9_res.frame, asm_dec.frame_key_hint));
+    try t.expectEqualSlices(u8, &[_]u8{ 0x82, 0x49, 0x83, 0x42 }, vp9_res.frame);
+
+    // AV1 W=2 N=1 (Sequence Header OBU=1 + Frame OBU)
+    const av1_pkt = [_]u8{
+        0x28, // Z=0, Y=0, W=2, N=1
+        0x03, // leb128 len = 3
+        0x08, 0x00, 0x00, // OBU_SEQUENCE_HEADER (type=1 -> hdr=0x08) without size
+        0x30, 0xAA, 0xBB, // OBU_FRAME
+    };
+    const av1_res = asm_dec.pushPacket(.av1, 13, 3000, true, &av1_pkt);
+    try t.expect(av1_res == .frame);
+    try t.expect(isKeyframe(.av1, av1_res.frame, asm_dec.frame_key_hint));
+    // First OBU got has_size bit (0x0A) + leb128(2) inserted; final OBU kept cleanly.
+    try t.expectEqualSlices(u8, &[_]u8{ 0x0A, 0x02, 0x00, 0x00, 0x30, 0xAA, 0xBB }, av1_res.frame);
+
+    // RFC 4588 RTX
+    const rtx_raw = [_]u8{ 0x12, 0x34, 0x65, 0x88, 0x99 };
+    const un = unwrapRtx(&rtx_raw).?;
+    try t.expectEqual(@as(u16, 0x1234), un.orig_seq);
+    try t.expectEqualSlices(u8, &[_]u8{ 0x65, 0x88, 0x99 }, un.orig_payload);
 }

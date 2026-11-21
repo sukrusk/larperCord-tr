@@ -249,6 +249,8 @@ pub fn enumerateDisplays(out: []media_if.DisplayTarget) usize {
 
 /// Conversor compartilhado BGRA->NV12 em GPU via ID3D11VideoProcessor (também usado por `wgc_cap.zig`).
 pub const Nv12GpuCtx = struct {
+    const gpu_ring_len = 3;
+
     dxgi_dll: ?*c.SDL_SharedObject = null,
     d3d11_dll: ?*c.SDL_SharedObject = null,
     device: ?*anyopaque = null,
@@ -257,8 +259,11 @@ pub const Nv12GpuCtx = struct {
     vctx: ?*anyopaque = null,
     v_enum: ?*anyopaque = null,
     v_proc: ?*anyopaque = null,
-    nv12_gpu: ?*anyopaque = null,
-    nv12_out_view: ?*anyopaque = null,
+    nv12_gpus: [gpu_ring_len]?*anyopaque = @splat(null),
+    nv12_out_views: [gpu_ring_len]?*anyopaque = @splat(null),
+    ring_idx: usize = 0,
+    last_ring_idx: usize = 0,
+    has_last_frame: bool = false,
     nv12_staging: ?*anyopaque = null,
     cpu_scratch: []u8 = &.{},
     in_w: u16 = 0,
@@ -318,8 +323,9 @@ pub const Nv12GpuCtx = struct {
         const vctx = self.vctx orelse return error.NoVideoContext;
         const v_enum = self.v_enum orelse return error.NoVideoEnum;
         const v_proc = self.v_proc orelse return error.NoVideoProc;
-        const out_view = self.nv12_out_view orelse return error.NoOutView;
-        const nv12_tex = self.nv12_gpu orelse return error.NoOutTex;
+        const slot_idx = self.ring_idx;
+        const out_view = self.nv12_out_views[slot_idx] orelse return error.NoOutView;
+        const nv12_tex = self.nv12_gpus[slot_idx] orelse return error.NoOutTex;
 
         // Cria InputView efêmera para a textura BGRA atual (O(1) no driver, sem cópia de memória).
         const create_iv = com.slot(vdev, 8, *const fn (*anyopaque, *anyopaque, *anyopaque, *const D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, *?*anyopaque) callconv(.winapi) HRESULT);
@@ -339,6 +345,10 @@ pub const Nv12GpuCtx = struct {
             return error.VideoProcessorBltFailed;
         }
 
+        self.last_ring_idx = slot_idx;
+        self.has_last_frame = true;
+        self.ring_idx = (slot_idx + 1) % gpu_ring_len;
+
         var frame: media_if.CaptureFrame = .{
             .width = self.out_w,
             .height = self.out_h,
@@ -353,7 +363,8 @@ pub const Nv12GpuCtx = struct {
     }
 
     pub fn repeatFrame(self: *Nv12GpuCtx, want_cpu_copy: bool, pts_us: i64) !?media_if.CaptureFrame {
-        const nv12_tex = self.nv12_gpu orelse return null;
+        if (!self.has_last_frame) return null;
+        const nv12_tex = self.nv12_gpus[self.last_ring_idx] orelse return null;
         if (self.out_w < 2 or self.out_h < 2) return null;
         var frame: media_if.CaptureFrame = .{
             .width = self.out_w,
@@ -397,7 +408,7 @@ pub const Nv12GpuCtx = struct {
     fn readbackNv12(self: *Nv12GpuCtx, frame: *media_if.CaptureFrame) !void {
         const d3d_ctx = self.ctx orelse return error.NoContext;
         const staging = self.nv12_staging orelse return error.NoStaging;
-        const gpu = self.nv12_gpu orelse return error.NoOutTex;
+        const gpu = self.nv12_gpus[self.last_ring_idx] orelse return error.NoOutTex;
 
         const copy_res = com.slot(d3d_ctx, 47, *const fn (*anyopaque, *anyopaque, *anyopaque) callconv(.winapi) void);
         copy_res(d3d_ctx, staging, gpu);
@@ -445,10 +456,17 @@ pub const Nv12GpuCtx = struct {
         const vdev = self.vdev orelse return error.NoVideoDevice;
 
         if (need_rebuild) {
-            com.release(self.nv12_out_view);
-            self.nv12_out_view = null;
-            com.release(self.nv12_gpu);
-            self.nv12_gpu = null;
+            for (&self.nv12_out_views) |*ov| {
+                com.release(ov.*);
+                ov.* = null;
+            }
+            for (&self.nv12_gpus) |*gt| {
+                com.release(gt.*);
+                gt.* = null;
+            }
+            self.has_last_frame = false;
+            self.ring_idx = 0;
+            self.last_ring_idx = 0;
             com.release(self.nv12_staging);
             self.nv12_staging = null;
             com.release(self.v_proc);
@@ -476,15 +494,16 @@ pub const Nv12GpuCtx = struct {
                 .BindFlags = com.D3D11_BIND_RENDER_TARGET | com.D3D11_BIND_SHADER_RESOURCE | com.D3D11_BIND_VIDEO_ENCODER,
             };
             const create_tex = com.slot(dev, 5, *const fn (*anyopaque, *const D3D11_TEXTURE2D_DESC, ?*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT);
-            if (!com.succeeded(create_tex(dev, &tdesc, null, &self.nv12_gpu)) or self.nv12_gpu == null) {
-                tdesc.BindFlags = com.D3D11_BIND_RENDER_TARGET | com.D3D11_BIND_SHADER_RESOURCE;
-                if (!com.succeeded(create_tex(dev, &tdesc, null, &self.nv12_gpu)) or self.nv12_gpu == null) return error.CreateNv12TexFailed;
-            }
-
-            var ov_desc: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC = .{};
             const create_ov = com.slot(vdev, 9, *const fn (*anyopaque, *anyopaque, *anyopaque, *const D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, *?*anyopaque) callconv(.winapi) HRESULT);
-            if (!com.succeeded(create_ov(vdev, self.nv12_gpu.?, self.v_enum.?, &ov_desc, &self.nv12_out_view)) or self.nv12_out_view == null) {
-                return error.CreateOutViewFailed;
+            var ov_desc: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC = .{};
+            for (0..gpu_ring_len) |ri| {
+                if (!com.succeeded(create_tex(dev, &tdesc, null, &self.nv12_gpus[ri])) or self.nv12_gpus[ri] == null) {
+                    tdesc.BindFlags = com.D3D11_BIND_RENDER_TARGET | com.D3D11_BIND_SHADER_RESOURCE;
+                    if (!com.succeeded(create_tex(dev, &tdesc, null, &self.nv12_gpus[ri])) or self.nv12_gpus[ri] == null) return error.CreateNv12TexFailed;
+                }
+                if (!com.succeeded(create_ov(vdev, self.nv12_gpus[ri].?, self.v_enum.?, &ov_desc, &self.nv12_out_views[ri])) or self.nv12_out_views[ri] == null) {
+                    return error.CreateOutViewFailed;
+                }
             }
 
             self.in_w = in_w;
@@ -515,8 +534,14 @@ pub const Nv12GpuCtx = struct {
             self.cpu_scratch = &.{};
         }
         com.release(self.nv12_staging);
-        com.release(self.nv12_out_view);
-        com.release(self.nv12_gpu);
+        for (&self.nv12_out_views) |*ov| {
+            com.release(ov.*);
+            ov.* = null;
+        }
+        for (&self.nv12_gpus) |*gt| {
+            com.release(gt.*);
+            gt.* = null;
+        }
         com.release(self.v_proc);
         com.release(self.v_enum);
         com.release(self.vctx);
@@ -524,8 +549,7 @@ pub const Nv12GpuCtx = struct {
         com.release(self.ctx);
         com.release(self.device);
         self.nv12_staging = null;
-        self.nv12_out_view = null;
-        self.nv12_gpu = null;
+        self.has_last_frame = false;
         self.v_proc = null;
         self.v_enum = null;
         self.vctx = null;
@@ -680,7 +704,8 @@ pub const Duplicator = struct {
         const is_bgra8 = tdesc.Format == com.DXGI_FORMAT_B8G8R8A8_UNORM;
 
         const d3d_ctx = self.gpu.ctx orelse return error.NoContext;
-        const desktop_dirty = info.LastPresentTime != 0 or info.AccumulatedFrames > 0 or !self.has_desktop;
+        const desktop_dirty = info.LastPresentTime != 0 or info.AccumulatedFrames > 0;
+        if (!self.has_desktop and !desktop_dirty) return null;
         var base_tex: *anyopaque = tex;
 
         // Mantém cópia limpa da tela para repintar apenas o ponteiro em atualizações só do mouse.

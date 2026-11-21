@@ -1,5 +1,19 @@
 # O que mudou em cada versão
 
+## 0.8.2
+
+**Assistir Lives do Discord**
+- Adicionados selos clicáveis `[LIVE]` na barra de canais de voz (`comp_channels.zig`), selos `▶ LIVE` nos cards da call (`call_grid.zig`) e atalhos **"Assistir transmissão"** no menu de contexto para entrar no canal e abrir a live direto (`app.zig`, `popup.zig`).
+- Corrigido o `OP 0 IDENTIFY` do `watch_voice` em `voice.zig` (`setWatchStreamMode`) para espectadores não anunciarem stream de saída falsa, e evitada a adivinhação de `watch_rtc_server` antes do `STREAM_CREATE` em `discord.zig` (reiniciando o `watch_voice` se o servidor ou canal RTC mudar).
+- Adicionada decodificação nativa `VP80`/`VP90` via Media Foundation (`mf_codec.zig`) e fallback via FFmpeg `RawDecoder` (`ffmpeg.zig`) junto ao `H264` (desempacotamento RTP `VP8`/`VP9`/`AV1` em `video_rtp.zig` e negociação no `SelectProtocol` em `call_json.zig`).
+- Registrado `audio_ssrc` nas chaves DAVE em `OP 12` `VIDEO`, adicionado suporte a pacotes RTX (RFC 4588 `unwrapRtx`) e corrigido o descarte de PTs `< 96` em `voice.zig::onRtp`.
+
+**AnyDesk e Câmeras Estáveis**
+- Eliminados o flicker e o mouse escorregadio no AnyDesk (`remote_ctrl.zig`, `live_video.zig`, `stream_view.zig`): deduplicados quadros P2P vs SFU no `watch_slot`, movida a decodificação P2P para uma thread própria (`viewerDecMain`), drenagem em rajada com buffers UDP de `4 MiB`, coalescência de `mouse_move`, um lock `mu` por quadro no envio e coordenadas limitadas na borda (`mapViewportToNormalizedClamped`).
+- Corrigidos flicker DXGI e tempestade de keyframes: triplo buffer em `Nv12GpuCtx` no `dxgi_cap.zig`, descarte do quadro #0 em branco sem atualização da área de trabalho, limpeza de `CODECAPI_AVEncVideoForceKeyFrame` após `ProcessInput` (`mf_codec.zig`) e detecção de quadros incompletos via `FrameAssembler.takeAbandoned()`.
+- Corrigido travamento de webcams (`live_video.zig`): formatos sem compressão priorizados antes de `MJPG` com fallback `stbi_load_from_memory` -> NV12, watchdog de 2,5 s para reabrir câmera travada e drenagem completa de `pollOutput()` antes de enviar novos quadros ao encoder assíncrono.
+- Corrigido congelamento das câmeras no SFU em perdas e trocas DAVE (`voice.zig`): removido bloqueio global `dec_wait_key` entre participantes, pedido de PLI por SSRC em falhas `.dropped`/abandonadas/DAVE, `tx_wait_key` armado quando o DAVE descarta o quadro inicial e fila `dec_ring` ampliada para 16 quadros.
+
 ## 0.8.1
 
 **Aba Vídeo e Câmera**

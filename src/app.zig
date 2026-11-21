@@ -101,7 +101,7 @@ fn onVoiceRemoteClear(_: ?*anyopaque, peer: types.Id, is_stream: bool) void {
     live_video.eng.clearRemoteVideo(peer, is_stream);
 }
 fn onP2pRemoteVideo(_: ?*anyopaque, w: u16, h: u16, y: []const u8, yp: usize, uv: []const u8, uvp: usize, codec: video_cfg.Codec, pts_ms: i64) void {
-    live_video.eng.onRemoteVideoFrame(0, true, w, h, y, yp, uv, uvp, codec, pts_ms);
+    live_video.eng.onP2pRemoteVideoFrame(w, h, y, yp, uv, uvp, codec, pts_ms);
 }
 fn onCamEncodedAu(_: ?*anyopaque, codec: video_cfg.Codec, pts_us: i64, is_keyframe: bool, au: []const u8) void {
     voice_mod.media_bridge.submitAu(false, codec, pts_us, is_keyframe, au);
@@ -2333,6 +2333,8 @@ pub const App = struct {
             },
             .leave_voice => {
                 if (st.voice != null) voz_audio.play(.leave);
+                st.pending_watch_channel = 0;
+                st.pending_watch_owner = 0;
                 app.resetCallState();
                 st.voice = null;
                 st.voice_status = .disconnected;
@@ -2411,6 +2413,25 @@ pub const App = struct {
                 app.cmd(.stop_stream);
                 app.compact_wanted.store(true, .release);
                 app.trim_wanted.store(true, .release);
+            },
+            .watch_member_stream => |wms| {
+                if (st.voice == wms.channel) {
+                    if (st.voice_status == .connected) {
+                        st.call_view = true;
+                        app.handle(.{ .watch_stream = wms.owner });
+                    } else {
+                        st.pending_watch_channel = wms.channel;
+                        st.pending_watch_owner = wms.owner;
+                        st.call_view = true;
+                    }
+                } else {
+                    app.handle(.{ .toggle_voice = wms.channel });
+                    if (st.voice == wms.channel) {
+                        st.pending_watch_channel = wms.channel;
+                        st.pending_watch_owner = wms.owner;
+                        st.call_view = true;
+                    }
+                }
             },
             .watch_stream => |owner| {
                 const ch = st.voice orelse return;
@@ -2739,6 +2760,12 @@ pub const App = struct {
                     } else if (e.voice_status.status == .connected) {
                         app.st.showToast(now(), false, "entrou na call", "joined the call", .{});
                         if (!was_connected) voz_audio.play(.join);
+                        if (app.st.pending_watch_owner != 0 and app.st.voice == app.st.pending_watch_channel) {
+                            const pw_owner = app.st.pending_watch_owner;
+                            app.st.pending_watch_owner = 0;
+                            app.st.pending_watch_channel = 0;
+                            app.handle(.{ .watch_stream = pw_owner });
+                        }
                     }
                 }
             }

@@ -68,5 +68,7 @@ pub const HwCapability = struct {
     h264_dec: bool = false,
     hevc_dec: bool = false,
     av1_dec: bool = false,
+    vp8_dec: bool = false,
+    vp9_dec: bool = false,
     zero_copy_d3d11: bool = false,
 };

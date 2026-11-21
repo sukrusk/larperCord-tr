@@ -1740,8 +1740,11 @@ pub const Gateway = struct {
                 if (call_json.streamSetPaused(&pb, sk, false)) |p| _ = g.writeWs(p);
                 g.tryStartStreamVoice();
             } else if (is_watching) {
+                const srv_changed = (g.watch_rtc_server != 0 and g.watch_rtc_server != rtc_srv) or
+                    (g.watch_rtc_channel != 0 and g.watch_rtc_channel != rtc_ch);
                 g.watch_rtc_server = rtc_srv;
                 g.watch_rtc_channel = rtc_ch;
+                if (srv_changed) g.killWatchVoice();
                 g.tryStartWatchVoice();
             }
             g.emit(.{ .stream_update = .{
@@ -4159,7 +4162,7 @@ pub const Gateway = struct {
             true,
             false,
         );
-        wv.setStreamMode(g.watch_key[0..g.watch_key_len]);
+        wv.setWatchStreamMode(g.watch_key[0..g.watch_key_len]);
         wv.start() catch {
             wv.deinit();
             alloc.destroy(wv);
@@ -5179,7 +5182,7 @@ pub const Gateway = struct {
                 if (ws.watch) {
                     g.killWatchVoice();
                     const meta = g.lookupStreamMeta(sk);
-                    g.watch_rtc_server = if (meta) |m| m.rtc_server else ws.guild;
+                    g.watch_rtc_server = if (meta) |m| m.rtc_server else 0;
                     g.watch_rtc_channel = if (meta) |m| m.rtc_channel else 0;
                     g.watch_endpoint_len = 0;
                     g.watch_token_len = 0;

@@ -82,6 +82,8 @@ pub const MFVideoFormat_NV12 = mfGuid("NV12");
 pub const MFVideoFormat_H264 = mfGuid("H264");
 pub const MFVideoFormat_HEVC = mfGuid("HEVC");
 pub const MFVideoFormat_AV1 = mfGuid("AV01");
+pub const MFVideoFormat_VP80 = mfGuid("VP80");
+pub const MFVideoFormat_VP90 = mfGuid("VP90");
 
 pub const MF_MT_MAJOR_TYPE = GUID.init(0x48EBA18E, 0xF8C9, 0x4687, .{ 0xBF, 0x11, 0x0A, 0x74, 0xC9, 0xF9, 0x6A, 0x8F });
 pub const MF_MT_SUBTYPE = GUID.init(0xF7E34C9A, 0x42E8, 0x4714, .{ 0xB7, 0x4B, 0xCB, 0x29, 0xD7, 0x2C, 0x35, 0xE5 });

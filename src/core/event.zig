@@ -583,6 +583,7 @@ pub const Action = union(enum) {
     start_screen_share: video_cfg.StreamConfig,
     stop_screen_share,
     watch_stream: Id,
+    watch_member_stream: struct { channel: Id, owner: Id },
     request_remote_ctrl: struct { peer: Id, perm: video_cfg.RemotePerm },
     respond_remote_ctrl: struct { peer: Id, perm: video_cfg.RemotePerm },
     stop_remote_ctrl,

@@ -1,5 +1,19 @@
 # What changed in each version
 
+## 0.8.2
+
+**Discord Live Stream Viewing**
+- Added clickable `[LIVE]` pills in the voice channel sidebar (`comp_channels.zig`), `▶ LIVE` badges on call tiles (`call_grid.zig`), and right-click **"Watch Stream"** actions that automatically join the voice channel and open the Go Live viewer (`app.zig`, `popup.zig`).
+- Fixed viewer `watch_voice` OP 0 `IDENTIFY` in `voice.zig` (`setWatchStreamMode`) so viewers do not falsely advertise an outbound screen stream, and prevented `discord.zig` from guessing `watch_rtc_server` before `STREAM_CREATE` arrives (restarting `watch_voice` if `rtc_server`/`rtc_channel` change).
+- Added native Windows Media Foundation `VP80`/`VP90` (`mf_codec.zig`) and FFmpeg `RawDecoder` (`ffmpeg.zig`) decode paths alongside `H264` (`VP8`/`VP9`/`AV1` depacketization in `video_rtp.zig` and `SelectProtocol` capability negotiation in `call_json.zig`).
+- Registered `audio_ssrc` DAVE keys on `OP 12` `VIDEO`, unwrapped RFC 4588 RTX packets (`unwrapRtx`), and stopped discarding non-`>= 96` payload types in `voice.zig::onRtp`.
+
+**Smooth AnyDesk & Cameras**
+- Eliminated AnyDesk flicker and mouse ice-skating (`remote_ctrl.zig`, `live_video.zig`, `stream_view.zig`): deduplicated P2P vs SFU frames in `watch_slot`, moved P2P decoding off the UDP receive loop onto `viewerDecMain`, added burst UDP socket draining with `4 MiB` buffers and `mouse_move` coalescing, locked `mu` once per video AU, and clamped edge drag coordinates (`mapViewportToNormalizedClamped`) instead of aborting held inputs.
+- Fixed DXGI async GPU hazard and encoder keyframe flooding: triple-buffered `Nv12GpuCtx` in `dxgi_cap.zig`, skipped blank frame #0 before desktop updates, cleared `CODECAPI_AVEncVideoForceKeyFrame` after `ProcessInput` in `mf_codec.zig`, and flushed abandoned partial RTP frames via `FrameAssembler.takeAbandoned()`.
+- Fixed freezing webcams (`live_video.zig`): prioritized uncompressed capture formats ahead of `MJPG` with `stbi_load_from_memory` -> NV12 fallback decoding, added a 2.5 s stalled-camera reopen watchdog, and drained async encoder `pollOutput()` queues before encoding new frames.
+- Fixed SFU camera freezes across packet drops and DAVE transitions (`voice.zig`): removed global `dec_wait_key` cross-peer blocking, triggered per-peer PLI + `got_keyframe` reset on `.dropped`/abandoned/decrypt errors, armed `tx_wait_key` when DAVE encryption skips initial frames, and expanded `dec_ring` to 16 slots.
+
 ## 0.8.1
 
 **Video & Camera Settings UI**

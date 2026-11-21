@@ -193,6 +193,15 @@ pub const Manager = struct {
     video_seq: u16 = 0,
     packets_rx: std.atomic.Value(u64) = .init(0),
     packets_tx: std.atomic.Value(u64) = .init(0),
+    dec_mu: ?*c.SDL_Mutex = null,
+    dec_cond: ?*c.SDL_Condition = null,
+    dec_thread: ?*c.SDL_Thread = null,
+    dec_stop: std.atomic.Value(bool) = .init(false),
+    dec_ring: [12]DecJob = @splat(.{}),
+    dec_head: u8 = 0,
+    dec_tail: u8 = 0,
+    dec_count: u8 = 0,
+    dec_wait_key: bool = false,
     on_video_chunk: ?*const fn (ctx: ?*anyopaque, data: []const u8) void = null,
     on_video_ctx: ?*anyopaque = null,
     on_video_frame: ?*const fn (
@@ -228,6 +237,10 @@ pub const Manager = struct {
 
     pub fn activeHost(self: *const Manager) bool {
         return self.active_flag.load(.acquire) and self.host_flag.load(.acquire);
+    }
+
+    pub fn activeViewer(self: *const Manager) bool {
+        return self.active_flag.load(.acquire) and !self.host_flag.load(.acquire);
     }
 
     pub fn consumeKeyReq(self: *Manager) bool {
@@ -311,6 +324,7 @@ pub const Manager = struct {
         sess.perm = perm;
 
         self.sock = sock;
+        sys.bumpUdpBufs(sock, 4 * 1024 * 1024);
         self.peer_addr = addr;
         self.alt_addr = null;
         self.peer_locked.store(false, .release);
@@ -352,6 +366,7 @@ pub const Manager = struct {
         sess.perm = .full;
 
         self.sock = sock;
+        sys.bumpUdpBufs(sock, 4 * 1024 * 1024);
         self.peer_addr = addr;
         self.alt_addr = null;
         self.peer_locked.store(false, .release);
@@ -368,6 +383,7 @@ pub const Manager = struct {
         self.viewer_target_kind.store(0, .release);
         // Envia ping inicial para abrir NAT hole-punch e confirmar túnel criptografado.
         self.sendSealedPingNow();
+        self.startDecWorker();
         self.thread = c.SDL_CreateThread(viewerLoop, "rc-view", self) orelse {
             self.stopLocked();
             return error.ThreadFailed;
@@ -436,17 +452,18 @@ pub const Manager = struct {
         _ = .{ codec, is_keyframe };
         if (self.mu == null or !self.activeHost() or self.stopping.load(.acquire) or au.len == 0) return;
         const rtp_ts: u32 = @truncate((@as(u64, @intCast(@max(pts_us, @as(i64, 0)))) * 90) / 1000);
+        const m = self.mu orelse return;
+        _ = c.SDL_LockMutex(m);
+        defer _ = c.SDL_UnlockMutex(m);
+        if (!sys.valid(self.sock) or self.stopping.load(.acquire)) return;
+        const sess = if (self.session) |*s| s else return;
         const Tx = struct {
             m: *Manager,
+            sess: *proto.Session,
             ts: u32,
             fn emit(ctx: *anyopaque, payload: []const u8, marker: bool) void {
                 const st: *@This() = @ptrCast(@alignCast(ctx));
                 if (payload.len > video_rtp.max_rtp_payload + 32) return;
-                const m = st.m.mu orelse return;
-                _ = c.SDL_LockMutex(m);
-                defer _ = c.SDL_UnlockMutex(m);
-                if (!sys.valid(st.m.sock) or st.m.stopping.load(.acquire)) return;
-                const sess = if (st.m.session) |*s| s else return;
                 var msg_buf: [7 + video_rtp.max_rtp_payload + 32]u8 = undefined;
                 std.mem.writeInt(u32, msg_buf[0..4], st.ts, .big);
                 std.mem.writeInt(u16, msg_buf[4..6], st.m.video_seq, .big);
@@ -454,13 +471,13 @@ pub const Manager = struct {
                 st.m.video_seq +%= 1;
                 @memcpy(msg_buf[7..][0..payload.len], payload);
                 var wire: [1500]u8 = undefined;
-                const sealed = sess.seal(.video_chunk, msg_buf[0 .. 7 + payload.len], &wire) catch return;
+                const sealed = st.sess.seal(.video_chunk, msg_buf[0 .. 7 + payload.len], &wire) catch return;
                 if (sys.sendTo(st.m.sock, sealed, &st.m.peer_addr) > 0) {
                     _ = st.m.packets_tx.fetchAdd(1, .monotonic);
                 }
             }
         };
-        var tx: Tx = .{ .m = self, .ts = rtp_ts };
+        var tx: Tx = .{ .m = self, .sess = sess, .ts = rtp_ts };
         video_rtp.packetizeH264AnnexB(au, video_rtp.max_rtp_payload, .{ .ctx = &tx, .emit = Tx.emit });
     }
 
@@ -476,6 +493,7 @@ pub const Manager = struct {
             self.thread = null;
             c.SDL_WaitThread(t, null);
         }
+        self.stopDecWorker();
         if (self.mu) |m| _ = c.SDL_LockMutex(m);
         if (self.session) |*s| {
             s.wipe();
@@ -504,7 +522,103 @@ pub const Manager = struct {
             self.mu = null;
         }
     }
+
+    fn startDecWorker(self: *Manager) void {
+        if (self.dec_thread != null) return;
+        if (self.dec_mu == null) self.dec_mu = c.SDL_CreateMutex();
+        if (self.dec_cond == null) self.dec_cond = c.SDL_CreateCondition();
+        if (self.dec_mu == null or self.dec_cond == null) return;
+        self.dec_stop.store(false, .release);
+        self.dec_head = 0;
+        self.dec_tail = 0;
+        self.dec_count = 0;
+        self.dec_wait_key = false;
+        self.dec_thread = c.SDL_CreateThread(viewerDecMain, "rc-dec", self);
+    }
+
+    fn stopDecWorker(self: *Manager) void {
+        self.dec_stop.store(true, .release);
+        if (self.dec_mu) |m| {
+            _ = c.SDL_LockMutex(m);
+            if (self.dec_cond) |cd| c.SDL_BroadcastCondition(cd);
+            _ = c.SDL_UnlockMutex(m);
+        }
+        if (self.dec_thread) |t| {
+            c.SDL_WaitThread(t, null);
+            self.dec_thread = null;
+        }
+        for (&self.dec_ring) |*job| {
+            if (job.buf.len > 0) std.heap.page_allocator.free(job.buf);
+            job.* = .{};
+        }
+        self.dec_head = 0;
+        self.dec_tail = 0;
+        self.dec_count = 0;
+        self.dec_wait_key = false;
+        if (self.dec_cond) |cd| {
+            c.SDL_DestroyCondition(cd);
+            self.dec_cond = null;
+        }
+        if (self.dec_mu) |m| {
+            c.SDL_DestroyMutex(m);
+            self.dec_mu = null;
+        }
+    }
+
+    fn resetDecQueueWaitKey(self: *Manager) void {
+        const m = self.dec_mu orelse return;
+        _ = c.SDL_LockMutex(m);
+        self.dec_head = 0;
+        self.dec_tail = 0;
+        self.dec_count = 0;
+        self.dec_wait_key = true;
+        _ = c.SDL_UnlockMutex(m);
+    }
+
+    fn enqueueDecode(self: *Manager, pts_us: i64, is_key: bool, au: []const u8) bool {
+        if (au.len == 0) return false;
+        const m = self.dec_mu orelse return false;
+        const cd = self.dec_cond orelse return false;
+        _ = c.SDL_LockMutex(m);
+        defer _ = c.SDL_UnlockMutex(m);
+        if (self.dec_wait_key and !is_key) return false;
+        if (self.dec_count == self.dec_ring.len) {
+            if (is_key) {
+                self.dec_head = 0;
+                self.dec_tail = 0;
+                self.dec_count = 0;
+            } else {
+                self.dec_wait_key = true;
+                return false;
+            }
+        }
+        if (is_key) self.dec_wait_key = false;
+        const job = &self.dec_ring[self.dec_tail];
+        if (job.buf.len < au.len) {
+            const next = std.heap.page_allocator.alloc(u8, @max(au.len, 256 * 1024)) catch return false;
+            if (job.buf.len > 0) std.heap.page_allocator.free(job.buf);
+            job.buf = next;
+        }
+        @memcpy(job.buf[0..au.len], au);
+        job.len = au.len;
+        job.pts_us = pts_us;
+        self.dec_tail = (self.dec_tail + 1) % @as(u8, @intCast(self.dec_ring.len));
+        self.dec_count += 1;
+        c.SDL_SignalCondition(cd);
+        return true;
+    }
 };
+
+const DecJob = struct {
+    pts_us: i64 = 0,
+    len: usize = 0,
+    buf: []u8 = &.{},
+};
+
+fn isNewerSeq(seq: u32, prev: u32) bool {
+    const d: i32 = @bitCast(seq -% prev);
+    return d > 0 or d < -64;
+}
 
 fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
     const self: *Manager = @ptrCast(@alignCast(data.?));
@@ -519,6 +633,9 @@ fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
     var plain: [2048]u8 = undefined;
     var last_probe_ms: u64 = 0;
     var last_meta_ms: u64 = 0;
+    var has_mouse_seq = false;
+    var last_mouse_seq: u32 = 0;
+
     while (!self.stopping.load(.acquire)) {
         if (self.target_dirty.swap(false, .acq_rel)) {
             const nt = if (self.target_hwnd != 0) video_cfg.RemoteTarget.fromWindow(self.target_hwnd) else self.getCaptureTarget();
@@ -537,75 +654,110 @@ fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
         }
 
         var pfd = [1]sys.PollFd{.{ .fd = self.sock, .events = c.POLLIN, .revents = 0 }};
-        sys.poll(&pfd, 1, 20);
+        sys.poll(&pfd, 1, 8);
         if ((pfd[0].revents & c.POLLIN) == 0) continue;
 
-        var from: sys.SockAddrIn = undefined;
-        const n = sys.recvFrom(self.sock, &wire, &from);
-        if (n <= 0) continue;
-
-        _ = c.SDL_LockMutex(self.mu.?);
-        const sess = if (self.session) |*s| s else {
-            _ = c.SDL_UnlockMutex(self.mu.?);
-            break;
-        };
-        const opened = sess.open(wire[0..@intCast(n)], &plain) catch {
-            _ = c.SDL_UnlockMutex(self.mu.?);
-            continue;
-        };
-        const was_locked = self.peer_locked.swap(true, .release);
-        self.peer_addr = from;
-        const perm = sess.perm;
-        const allow_fn = sess.*;
+        // Drena toda a fila UDP de uma só vez e coalesce `mouse_move` mantendo apenas o último ponto.
+        var pending_move: ?video_cfg.RemoteInputPacket = null;
+        var batch: [32]video_cfg.RemoteInputPacket = undefined;
+        var batch_n: usize = 0;
+        var do_release_all = false;
         var pong_wire: [64]u8 = undefined;
         var pong_len: usize = 0;
-        var act_pkt: ?video_cfg.RemoteInputPacket = null;
-        var do_release_all = false;
+        var pong_peer: sys.SockAddrIn = undefined;
+        var unlocked_now = false;
 
-        switch (opened.msg_type) {
-            .input => {
-                if (video_cfg.RemoteInputPacket.decode(opened.payload)) |pkt| {
-                    if (pkt.kind == .ping) {
-                        var pong_raw: [video_cfg.RemoteInputPacket.wire_len]u8 = undefined;
-                        (@as(video_cfg.RemoteInputPacket, .{ .kind = .pong, .seq = pkt.seq })).encode(&pong_raw);
-                        if (sess.seal(.pong, &pong_raw, &pong_wire)) |sw| pong_len = sw.len else |_| {}
-                    } else if (pkt.kind == .switch_display) {
-                        if (allow_fn.allowInput(pkt)) {
-                            self.pending_switch_disp.store(@intCast(pkt.code), .release);
+        _ = c.SDL_LockMutex(self.mu.?);
+        var rx_count: usize = 0;
+        while (rx_count < 256) : (rx_count += 1) {
+            var from: sys.SockAddrIn = undefined;
+            const n = sys.recvFrom(self.sock, &wire, &from);
+            if (n <= 0) break;
+
+            const sess = if (self.session) |*s| s else break;
+            const opened = sess.open(wire[0..@intCast(n)], &plain) catch continue;
+            if (!self.peer_locked.swap(true, .release)) unlocked_now = true;
+            self.peer_addr = from;
+            const allow_fn = sess.*;
+
+            switch (opened.msg_type) {
+                .input => {
+                    if (video_cfg.RemoteInputPacket.decode(opened.payload)) |pkt| {
+                        if (pkt.kind == .ping) {
+                            var pong_raw: [video_cfg.RemoteInputPacket.wire_len]u8 = undefined;
+                            (@as(video_cfg.RemoteInputPacket, .{ .kind = .pong, .seq = pkt.seq })).encode(&pong_raw);
+                            if (sess.seal(.pong, &pong_raw, &pong_wire)) |sw| {
+                                pong_len = sw.len;
+                                pong_peer = from;
+                            } else |_| {}
+                        } else if (pkt.kind == .switch_display) {
+                            if (allow_fn.allowInput(pkt)) {
+                                self.pending_switch_disp.store(@intCast(pkt.code), .release);
+                            }
+                        } else if (allow_fn.allowInput(pkt)) {
+                            if (pkt.kind == .mouse_move) {
+                                if (!has_mouse_seq or isNewerSeq(pkt.seq, last_mouse_seq)) {
+                                    has_mouse_seq = true;
+                                    last_mouse_seq = pkt.seq;
+                                    pending_move = pkt;
+                                }
+                            } else {
+                                if (pending_move) |mv| {
+                                    if (batch_n < batch.len) {
+                                        batch[batch_n] = mv;
+                                        batch_n += 1;
+                                    }
+                                    pending_move = null;
+                                }
+                                if (batch_n < batch.len) {
+                                    batch[batch_n] = pkt;
+                                    batch_n += 1;
+                                }
+                            }
                         }
-                    } else if (allow_fn.allowInput(pkt)) {
-                        act_pkt = pkt;
+                        _ = self.packets_rx.fetchAdd(1, .monotonic);
+                    }
+                },
+                .release_all => {
+                    do_release_all = true;
+                    pending_move = null;
+                    batch_n = 0;
+                },
+                .video_pli => self.pli_pending.store(true, .release),
+                .ping => {
+                    if (sess.seal(.pong, opened.payload, &pong_wire)) |sw| {
+                        pong_len = sw.len;
+                        pong_peer = from;
+                    } else |_| {}
+                    _ = self.packets_rx.fetchAdd(1, .monotonic);
+                },
+                .pong => {
+                    if (opened.payload.len >= 8) {
+                        const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
+                        const now64: u64 = @intCast(c.SDL_GetTicks());
+                        if (now64 >= tx_ms) self.rtt_ms.store(@intCast(@min(now64 - tx_ms, 9999)), .release);
                     }
                     _ = self.packets_rx.fetchAdd(1, .monotonic);
-                }
-            },
-            .release_all => do_release_all = true,
-            .video_pli => self.pli_pending.store(true, .release),
-            .ping => {
-                if (sess.seal(.pong, opened.payload, &pong_wire)) |sw| pong_len = sw.len else |_| {}
-                _ = self.packets_rx.fetchAdd(1, .monotonic);
-            },
-            .pong => {
-                if (opened.payload.len >= 8) {
-                    const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
-                    const now64: u64 = @intCast(c.SDL_GetTicks());
-                    if (now64 >= tx_ms) self.rtt_ms.store(@intCast(@min(now64 - tx_ms, 9999)), .release);
-                }
-                _ = self.packets_rx.fetchAdd(1, .monotonic);
-            },
-            else => {},
+                },
+                else => {},
+            }
         }
-        const reply_peer = self.peer_addr;
+        const cur_perm = if (self.session) |s| s.perm else video_cfg.RemotePerm.off;
         _ = c.SDL_UnlockMutex(self.mu.?);
 
-        // Executa SendInput fora do mutex para nunca bloquear sendVideoAu (60fps) no host.
+        if (pending_move) |mv| {
+            if (batch_n < batch.len) {
+                batch[batch_n] = mv;
+                batch_n += 1;
+            }
+        }
+        if (pong_len > 0) _ = sys.sendTo(self.sock, pong_wire[0..pong_len], &pong_peer);
         if (do_release_all) {
             if (inj) |*i| i.releaseAll();
-        } else if (act_pkt) |pkt| {
-            if (inj) |*i| i.apply(pkt, perm);
+        } else if (inj) |*i| {
+            for (batch[0..batch_n]) |pkt| i.apply(pkt, cur_perm);
         }
-        if (pong_len > 0) _ = sys.sendTo(self.sock, pong_wire[0..pong_len], &reply_peer);
-        if (!was_locked) self.host_meta_dirty.store(true, .release);
+        if (unlocked_now) self.host_meta_dirty.store(true, .release);
     }
     return 0;
 }
@@ -620,14 +772,68 @@ fn sendHostMetaLocked(self: *Manager) void {
     self.sendSealedType(.host_info, &raw);
 }
 
+fn viewerDecMain(data: ?*anyopaque) callconv(.c) c_int {
+    const self: *Manager = @ptrCast(@alignCast(data.?));
+    const m = self.dec_mu orelse return 0;
+    const cd = self.dec_cond orelse return 0;
+
+    var dec_opt: ?capture_backend.HwDecoder = null;
+    defer if (dec_opt) |*d| d.deinit();
+
+    var local_au: []u8 = &.{};
+    defer if (local_au.len > 0) std.heap.page_allocator.free(local_au);
+
+    while (!self.dec_stop.load(.acquire)) {
+        _ = c.SDL_LockMutex(m);
+        while (self.dec_count == 0 and !self.dec_stop.load(.acquire)) {
+            _ = c.SDL_WaitCondition(cd, m);
+        }
+        if (self.dec_stop.load(.acquire)) {
+            _ = c.SDL_UnlockMutex(m);
+            break;
+        }
+        const job = &self.dec_ring[self.dec_head];
+        const j_len = job.len;
+        const j_pts = job.pts_us;
+        if (local_au.len < j_len) {
+            const next = std.heap.page_allocator.alloc(u8, @max(j_len, 256 * 1024)) catch {
+                self.dec_head = (self.dec_head + 1) % @as(u8, @intCast(self.dec_ring.len));
+                self.dec_count -= 1;
+                _ = c.SDL_UnlockMutex(m);
+                continue;
+            };
+            if (local_au.len > 0) std.heap.page_allocator.free(local_au);
+            local_au = next;
+        }
+        @memcpy(local_au[0..j_len], job.buf[0..j_len]);
+        self.dec_head = (self.dec_head + 1) % @as(u8, @intCast(self.dec_ring.len));
+        self.dec_count -= 1;
+        _ = c.SDL_UnlockMutex(m);
+
+        if (dec_opt == null) {
+            dec_opt = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch null;
+        }
+        if (dec_opt) |*dc| {
+            if (dc.decode(local_au[0..j_len], j_pts) catch null) |df| {
+                _ = c.SDL_LockMutex(self.mu.?);
+                const fcb = self.on_video_frame;
+                const fctx = self.on_frame_ctx;
+                _ = c.SDL_UnlockMutex(self.mu.?);
+                if (fcb) |f| {
+                    f(fctx, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, @intCast(c.SDL_GetTicks()));
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 fn viewerLoop(data: ?*anyopaque) callconv(.c) c_int {
     const self: *Manager = @ptrCast(@alignCast(data.?));
     var wire: [65536]u8 = undefined;
     var plain: [65536]u8 = undefined;
     var assembler = video_rtp.FrameAssembler.init(std.heap.page_allocator);
     defer assembler.deinit();
-    var dec_opt: ?capture_backend.HwDecoder = null;
-    defer if (dec_opt) |*d| d.deinit();
     var last_probe_ms: u64 = 0;
     var last_pli_ms: u64 = 0;
     var got_keyframe = false;
@@ -640,100 +846,109 @@ fn viewerLoop(data: ?*anyopaque) callconv(.c) c_int {
             self.sendSealedPingNow();
         }
         var pfd = [1]sys.PollFd{.{ .fd = self.sock, .events = c.POLLIN, .revents = 0 }};
-        sys.poll(&pfd, 1, 20);
+        sys.poll(&pfd, 1, 8);
         if ((pfd[0].revents & c.POLLIN) == 0) continue;
 
-        var from: sys.SockAddrIn = undefined;
-        const n = sys.recvFrom(self.sock, &wire, &from);
-        if (n <= 0) continue;
+        var rx_count: usize = 0;
+        while (rx_count < 512 and !self.stopping.load(.acquire)) : (rx_count += 1) {
+            var from: sys.SockAddrIn = undefined;
+            const n = sys.recvFrom(self.sock, &wire, &from);
+            if (n <= 0) break;
 
-        _ = c.SDL_LockMutex(self.mu.?);
-        const sess = if (self.session) |*s| s else {
+            _ = c.SDL_LockMutex(self.mu.?);
+            const sess = if (self.session) |*s| s else {
+                _ = c.SDL_UnlockMutex(self.mu.?);
+                return 0;
+            };
+            const opened = sess.open(wire[0..@intCast(n)], &plain) catch {
+                _ = c.SDL_UnlockMutex(self.mu.?);
+                continue;
+            };
+            self.peer_addr = from;
+            self.peer_locked.store(true, .release);
+            const cb = self.on_video_chunk;
+            const cb_ctx = self.on_video_ctx;
+            const has_fcb = self.on_video_frame != null;
             _ = c.SDL_UnlockMutex(self.mu.?);
-            break;
-        };
-        const opened = sess.open(wire[0..@intCast(n)], &plain) catch {
-            _ = c.SDL_UnlockMutex(self.mu.?);
-            continue;
-        };
-        self.peer_addr = from;
-        self.peer_locked.store(true, .release);
-        const cb = self.on_video_chunk;
-        const cb_ctx = self.on_video_ctx;
-        const fcb = self.on_video_frame;
-        const fctx = self.on_frame_ctx;
-        _ = c.SDL_UnlockMutex(self.mu.?);
 
-        _ = self.packets_rx.fetchAdd(1, .monotonic);
-        switch (opened.msg_type) {
-            .ping => {
-                var pong_buf: [64]u8 = undefined;
-                if (self.mu) |m| {
-                    _ = c.SDL_LockMutex(m);
-                    const plen: usize = if (self.session) |*s| (if (s.seal(.pong, opened.payload, &pong_buf)) |sw| sw.len else |_| 0) else 0;
-                    const peer = self.peer_addr;
-                    _ = c.SDL_UnlockMutex(m);
-                    if (plen > 0) _ = sys.sendTo(self.sock, pong_buf[0..plen], &peer);
-                }
-            },
-            .pong => {
-                if (opened.payload.len >= 8) {
-                    const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
-                    const cur_ms: u64 = @intCast(c.SDL_GetTicks());
-                    if (cur_ms >= tx_ms) self.rtt_ms.store(@intCast(@min(cur_ms - tx_ms, 9999)), .release);
-                }
-            },
-            .host_info => {
-                if (proto.HostInfo.decode(opened.payload)) |hi| {
-                    self.viewer_displays.store(hi.display_count, .release);
-                    self.viewer_active_disp.store(hi.active_display, .release);
-                    self.viewer_target_kind.store(@intFromEnum(hi.target_kind), .release);
-                }
-            },
-            .video_chunk => {
-                if (fcb != null and opened.payload.len > 7) {
-                    const rtp_ts = std.mem.readInt(u32, opened.payload[0..4], .big);
-                    const seq = std.mem.readInt(u16, opened.payload[4..6], .big);
-                    const marker = (opened.payload[6] & 1) != 0;
-                    const rtp_pay = opened.payload[7..];
-                    switch (assembler.pushH264(seq, rtp_ts, marker, rtp_pay)) {
-                        .dropped => |dr| {
-                            const tnow = c.SDL_GetTicks();
-                            if (dr.need_pli and tnow - last_pli_ms >= 800) {
-                                last_pli_ms = tnow;
-                                self.sendSealedType(.video_pli, &.{});
-                            }
-                        },
-                        .frame => |au| {
-                            if (!got_keyframe) {
-                                if (hasH264Keyframe(au)) {
-                                    got_keyframe = true;
-                                } else {
+            _ = self.packets_rx.fetchAdd(1, .monotonic);
+            switch (opened.msg_type) {
+                .ping => {
+                    var pong_buf: [64]u8 = undefined;
+                    if (self.mu) |m| {
+                        _ = c.SDL_LockMutex(m);
+                        const plen: usize = if (self.session) |*s| (if (s.seal(.pong, opened.payload, &pong_buf)) |sw| sw.len else |_| 0) else 0;
+                        const peer = self.peer_addr;
+                        _ = c.SDL_UnlockMutex(m);
+                        if (plen > 0) _ = sys.sendTo(self.sock, pong_buf[0..plen], &peer);
+                    }
+                },
+                .pong => {
+                    if (opened.payload.len >= 8) {
+                        const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
+                        const cur_ms: u64 = @intCast(c.SDL_GetTicks());
+                        if (cur_ms >= tx_ms) self.rtt_ms.store(@intCast(@min(cur_ms - tx_ms, 9999)), .release);
+                    }
+                },
+                .host_info => {
+                    if (proto.HostInfo.decode(opened.payload)) |hi| {
+                        self.viewer_displays.store(hi.display_count, .release);
+                        self.viewer_active_disp.store(hi.active_display, .release);
+                        self.viewer_target_kind.store(@intFromEnum(hi.target_kind), .release);
+                    }
+                },
+                .video_chunk => {
+                    if (has_fcb and opened.payload.len > 7) {
+                        const rtp_ts = std.mem.readInt(u32, opened.payload[0..4], .big);
+                        const seq = std.mem.readInt(u16, opened.payload[4..6], .big);
+                        const marker = (opened.payload[6] & 1) != 0;
+                        const rtp_pay = opened.payload[7..];
+                        switch (assembler.pushH264(seq, rtp_ts, marker, rtp_pay)) {
+                            .dropped => |dr| {
+                                got_keyframe = false;
+                                self.resetDecQueueWaitKey();
+                                const tnow = c.SDL_GetTicks();
+                                if (dr.need_pli and tnow - last_pli_ms >= 150) {
+                                    last_pli_ms = tnow;
+                                    self.sendSealedType(.video_pli, &.{});
+                                }
+                            },
+                            .frame => |au| {
+                                const is_key = hasH264Keyframe(au);
+                                if (assembler.takeAbandoned() and !is_key) {
+                                    got_keyframe = false;
+                                    self.resetDecQueueWaitKey();
+                                }
+                                if (!got_keyframe) {
+                                    if (is_key) {
+                                        got_keyframe = true;
+                                    } else {
+                                        const tnow = c.SDL_GetTicks();
+                                        if (tnow - last_pli_ms >= 150) {
+                                            last_pli_ms = tnow;
+                                            self.sendSealedType(.video_pli, &.{});
+                                        }
+                                        continue;
+                                    }
+                                }
+                                const pts_us: i64 = @divTrunc(@as(i64, rtp_ts) * 1000, 90);
+                                if (!self.enqueueDecode(pts_us, is_key, au)) {
+                                    got_keyframe = false;
                                     const tnow = c.SDL_GetTicks();
-                                    if (tnow - last_pli_ms >= 800) {
+                                    if (tnow - last_pli_ms >= 150) {
                                         last_pli_ms = tnow;
                                         self.sendSealedType(.video_pli, &.{});
                                     }
-                                    continue;
                                 }
-                            }
-                            if (dec_opt == null) {
-                                dec_opt = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch null;
-                            }
-                            if (dec_opt) |*dc| {
-                                const pts_us: i64 = @divTrunc(@as(i64, rtp_ts) * 1000, 90);
-                                if (dc.decode(au, pts_us) catch null) |df| {
-                                    fcb.?(fctx, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, @intCast(c.SDL_GetTicks()));
-                                }
-                            }
-                        },
-                        else => {},
+                            },
+                            else => {},
+                        }
+                    } else if (cb) |f| {
+                        f(cb_ctx, opened.payload);
                     }
-                } else if (cb) |f| {
-                    f(cb_ctx, opened.payload);
-                }
-            },
-            else => {},
+                },
+                else => {},
+            }
         }
     }
     return 0;

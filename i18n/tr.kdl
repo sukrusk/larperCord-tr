@@ -22,6 +22,7 @@
 // settings folder (~/.config on Linux, %APPDATA% on Windows) and restart the app.
 
 "  [LIVE]" "  [CANLI]"
+" [LIVE]" " [CANLI]"
 " (muted)" " (susturuldu)"
 " [deaf:srv]" " [sağır:sunucu]"
 " [deaf]" " [sağır]"
@@ -2285,6 +2286,7 @@
 "warning" "uyarı"
 "Watch 4K stream" "4K yayını izle"
 "Watch Stream" "Yayını İzle"
+"Watch live stream" "Canlı yayını izle"
 "Watching" "İzliyor"
 "Watching " "İzliyor: "
 "Wavy" "Dalgalı"
@@ -2479,6 +2481,7 @@
 "┌ direct messages" "┌ direkt mesajlar"
 "├ ☺ friends" "├ ☺ arkadaşlar"
 "├ ✉ message requests" "├ ✉ mesaj istekleri"
+"▶ LIVE" "▶ CANLI"
 "○  Invisible" "○  Görünmez"
 "◌ connecting…" "◌ bağlanıyor…"
 "◌ reconnecting…" "◌ yeniden bağlanıyor…"

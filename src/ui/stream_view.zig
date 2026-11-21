@@ -263,12 +263,21 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     // Captura de entrada remota quando o controle estilo AnyDesk estiver ativo no espectador.
     const app_focused = !ctx.io.*.AppFocusLost and c.SDL_GetKeyboardFocus() != null;
     const rc_viewer = !is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner;
-    const rc_eligible = rc_viewer and view != null and !ctrl_hovered and ctx.st.popup == .none and !ctx.st.settings.open and !ctx.st.palette.open and app_focused;
+    const dragging_btn = was_down_l or was_down_r or was_down_m or was_down_x1 or was_down_x2;
+    const rc_eligible = rc_viewer and view != null and (dragging_btn or !ctrl_hovered) and ctx.st.popup == .none and !ctx.st.settings.open and !ctx.st.palette.open and app_focused;
     var captured_now = false;
 
     if (rc_eligible) {
         const v = view.?;
-        if (video_cfg.mapViewportToNormalized(ctx.mouse.x, ctx.mouse.y, vid_r.x, vid_r.y, vid_r.w, vid_r.h, v.w, v.h)) |norm| {
+        const in_stage = dragging_btn or r.contains(ctx.mouse.x, ctx.mouse.y);
+        const norm_opt = if (in_stage)
+            (if (dragging_btn)
+                video_cfg.mapViewportToNormalizedClamped(ctx.mouse.x, ctx.mouse.y, vid_r.x, vid_r.y, vid_r.w, vid_r.h, v.w, v.h)
+            else
+                video_cfg.mapViewportToNormalized(ctx.mouse.x, ctx.mouse.y, vid_r.x, vid_r.y, vid_r.w, vid_r.h, v.w, v.h))
+        else
+            null;
+        if (norm_opt) |norm| {
             captured_now = true;
             const moved = last_norm == null or last_norm.?[0] != norm[0] or last_norm.?[1] != norm[1];
             last_norm = norm;
@@ -355,6 +364,10 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
             const nr: d.Rect = .{ .x = r.x + 10, .y = r.bottom() - 32, .w = nw, .h = 22 };
             d.rect(dl, nr, ctx.col(.online).alpha(0.85), 5);
             d.text(dl, fam.get(.semibold), 11.5, nr.x + 9, d.centerY(nr, 11.5), d.Rgba.white, ntxt);
+            if (!dragging_btn and r.contains(ctx.mouse.x, ctx.mouse.y)) {
+                c.ImDrawList_AddCircleEx(dl, d.v(ctx.mouse.x, ctx.mouse.y), 4.5, d.Rgba.black.alpha(0.75).u(), 12, 2.0, 0);
+                c.ImDrawList_AddCircleEx(dl, d.v(ctx.mouse.x, ctx.mouse.y), 4.5, ctx.col(.online).u(), 12, 1.2, 0);
+            }
         }
     }
     if (rc_viewer and !captured_now and hasHeldRemote()) {

@@ -106,8 +106,8 @@ pub fn runSelfProbe() void {
 
     const caps = probeCapabilities();
     std.debug.print(
-        "hw-probe: MF caps h264_enc={any} hevc_enc={any} av1_enc={any} h264_dec={any} hevc_dec={any} av1_dec={any} zero_copy={any}\n",
-        .{ caps.h264_enc, caps.hevc_enc, caps.av1_enc, caps.h264_dec, caps.hevc_dec, caps.av1_dec, caps.zero_copy_d3d11 },
+        "hw-probe: MF caps h264_enc={any} hevc_enc={any} av1_enc={any} h264_dec={any} hevc_dec={any} av1_dec={any} vp8_dec={any} vp9_dec={any} zero_copy={any}\n",
+        .{ caps.h264_enc, caps.hevc_enc, caps.av1_enc, caps.h264_dec, caps.hevc_dec, caps.av1_dec, caps.vp8_dec, caps.vp9_dec, caps.zero_copy_d3d11 },
     );
 
     if (comptime is_win) {

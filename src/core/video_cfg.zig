@@ -222,6 +222,33 @@ pub fn mapViewportToNormalized(
     video_w: u32,
     video_h: u32,
 ) ?[2]u16 {
+    return mapViewportNorm(mouse_x, mouse_y, box_x, box_y, box_w, box_h, video_w, video_h, false);
+}
+
+pub fn mapViewportToNormalizedClamped(
+    mouse_x: f32,
+    mouse_y: f32,
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+    video_w: u32,
+    video_h: u32,
+) ?[2]u16 {
+    return mapViewportNorm(mouse_x, mouse_y, box_x, box_y, box_w, box_h, video_w, video_h, true);
+}
+
+fn mapViewportNorm(
+    mouse_x: f32,
+    mouse_y: f32,
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+    video_w: u32,
+    video_h: u32,
+    clamp_outside: bool,
+) ?[2]u16 {
     if (box_w <= 1 or box_h <= 1 or video_w == 0 or video_h == 0) return null;
     const vw: f32 = @floatFromInt(video_w);
     const vh: f32 = @floatFromInt(video_h);
@@ -231,7 +258,7 @@ pub fn mapViewportToNormalized(
     const ox = box_x + (box_w - draw_w) * 0.5;
     const oy = box_y + (box_h - draw_h) * 0.5;
     const eps: f32 = 0.01;
-    if (mouse_x < ox - eps or mouse_x > ox + draw_w + eps or mouse_y < oy - eps or mouse_y > oy + draw_h + eps) return null;
+    if (!clamp_outside and (mouse_x < ox - eps or mouse_x > ox + draw_w + eps or mouse_y < oy - eps or mouse_y > oy + draw_h + eps)) return null;
     const nx = std.math.clamp((mouse_x - ox) / draw_w, 0.0, 1.0);
     const ny = std.math.clamp((mouse_y - oy) / draw_h, 0.0, 1.0);
     return .{

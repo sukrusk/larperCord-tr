@@ -66,11 +66,28 @@ pub fn writeIdentifyVideoKind(out: *std.ArrayList(u8), a: std.mem.Allocator, gui
 
 /// Op 1 do gateway de voz: informa IP/porta UDP e declara codecs (Opus + H.264 encode/decode).
 pub fn writeSelectProtocol(out: *std.ArrayList(u8), a: std.mem.Allocator, ip: []const u8, port: u16, include_video: bool) !void {
+    return writeSelectProtocolCaps(out, a, ip, port, include_video, false, false, false);
+}
+
+pub fn writeSelectProtocolCaps(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    ip: []const u8,
+    port: u16,
+    include_video: bool,
+    dec_vp8: bool,
+    dec_vp9: bool,
+    dec_av1: bool,
+) !void {
     try out.appendSlice(a, "{\"op\":1,\"d\":{\"protocol\":\"udp\",\"data\":{\"address\":");
     try j.writeString(out, a, ip);
     try out.print(a, ",\"port\":{d},\"mode\":\"aead_xchacha20_poly1305_rtpsize\"}}", .{port});
     if (include_video) {
-        try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":101,\"rtx_payload_type\":102,\"encode\":true,\"decode\":true}],\"experiments\":[\"fixed_keyframe_interval\"]}}");
+        try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120},{\"name\":\"H264\",\"type\":\"video\",\"priority\":1000,\"payload_type\":101,\"rtx_payload_type\":102,\"encode\":true,\"decode\":true}");
+        if (dec_vp8) try out.appendSlice(a, ",{\"name\":\"VP8\",\"type\":\"video\",\"priority\":2000,\"payload_type\":103,\"rtx_payload_type\":104,\"encode\":false,\"decode\":true}");
+        if (dec_vp9) try out.appendSlice(a, ",{\"name\":\"VP9\",\"type\":\"video\",\"priority\":3000,\"payload_type\":105,\"rtx_payload_type\":106,\"encode\":false,\"decode\":true}");
+        if (dec_av1) try out.appendSlice(a, ",{\"name\":\"AV1\",\"type\":\"video\",\"priority\":4000,\"payload_type\":109,\"rtx_payload_type\":110,\"encode\":false,\"decode\":true}");
+        try out.appendSlice(a, "],\"experiments\":[\"fixed_keyframe_interval\"]}}");
     } else {
         try out.appendSlice(a, ",\"codecs\":[{\"name\":\"opus\",\"type\":\"audio\",\"priority\":1000,\"payload_type\":120}]}}");
     }

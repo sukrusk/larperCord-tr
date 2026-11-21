@@ -61,6 +61,7 @@ pub const Api = struct {
     av_get_pix_fmt: *const fn ([*:0]const u8) callconv(.c) c_int,
 
     avcodec_version: *const fn () callconv(.c) c_uint,
+    avcodec_find_decoder_by_name: *const fn ([*:0]const u8) callconv(.c) ?*const Codec,
     avcodec_alloc_context3: *const fn (?*const Codec) callconv(.c) ?*CodecCtx,
     avcodec_free_context: *const fn (*?*CodecCtx) callconv(.c) void,
     avcodec_parameters_to_context: *const fn (*CodecCtx, *const anyopaque) callconv(.c) c_int,
@@ -70,6 +71,7 @@ pub const Api = struct {
     avcodec_flush_buffers: *const fn (*CodecCtx) callconv(.c) void,
     av_packet_alloc: *const fn () callconv(.c) ?*Packet,
     av_packet_free: *const fn (*?*Packet) callconv(.c) void,
+    av_new_packet: *const fn (*Packet, c_int) callconv(.c) c_int,
     av_packet_unref: *const fn (*Packet) callconv(.c) void,
     av_packet_move_ref: *const fn (*Packet, *Packet) callconv(.c) void,
 
@@ -474,6 +476,132 @@ fn loadSet(s: Set, dir: ?[]const u8, dg: *Diag) bool {
 }
 
 // --- Campos lidos direto (deslocamentos das versões acima, 64 bits) ----------
+
+pub fn rawDecoderAvailable(names: []const [*:0]const u8) bool {
+    const a = get() orelse return false;
+    for (names) |nm| {
+        if (a.avcodec_find_decoder_by_name(nm) != null) return true;
+    }
+    return false;
+}
+
+/// Decodificador de pacotes crus (VP8 / VP9 / AV1 / H264 / HEVC) para NV12 via FFmpeg carregado sob demanda.
+pub const RawDecoder = struct {
+    api: *const Api,
+    ctx: *CodecCtx,
+    frame: *Frame,
+    pkt: *Packet,
+    sws: ?*Sws = null,
+    sws_key: [5]c_int = @splat(0),
+    nv12_fmt: c_int,
+    nv12_buf: []u8 = &.{},
+
+    pub const DecodedFrame = struct {
+        width: u16,
+        height: u16,
+        y: []const u8,
+        uv: []const u8,
+        pitch: u32,
+    };
+
+    pub fn open(names: []const [*:0]const u8) !RawDecoder {
+        const a = get() orelse return error.FfmpegUnavailable;
+        var found: ?*const Codec = null;
+        for (names) |nm| {
+            if (a.avcodec_find_decoder_by_name(nm)) |c_ptr| {
+                found = c_ptr;
+                break;
+            }
+        }
+        const codec = found orelse return error.DecoderNotFound;
+        var opt_ctx: ?*CodecCtx = a.avcodec_alloc_context3(codec) orelse return error.NoMem;
+        errdefer a.avcodec_free_context(&opt_ctx);
+        const ctx = opt_ctx.?;
+        _ = a.av_opt_set_int(ctx, "threads", 2, 0);
+        _ = a.av_opt_set(ctx, "flags", "low_delay", 0);
+        if (a.avcodec_open2(ctx, codec, null) < 0) return error.CodecOpenFailed;
+
+        var opt_frame: ?*Frame = a.av_frame_alloc() orelse return error.NoMem;
+        errdefer a.av_frame_free(&opt_frame);
+        var opt_pkt: ?*Packet = a.av_packet_alloc() orelse return error.NoMem;
+        errdefer a.av_packet_free(&opt_pkt);
+
+        const nv12 = a.av_get_pix_fmt("nv12");
+        if (nv12 < 0) return error.NoNv12Fmt;
+
+        return .{
+            .api = a,
+            .ctx = ctx,
+            .frame = opt_frame.?,
+            .pkt = opt_pkt.?,
+            .nv12_fmt = nv12,
+        };
+    }
+
+    pub fn decode(self: *RawDecoder, bytes: []const u8) !?DecodedFrame {
+        if (bytes.len == 0 or bytes.len > 16 * 1024 * 1024) return null;
+        const a = self.api;
+        a.av_packet_unref(self.pkt);
+        if (a.av_new_packet(self.pkt, @intCast(bytes.len)) < 0) return error.NoMem;
+        defer a.av_packet_unref(self.pkt);
+
+        if (field(c_int, self.pkt, 32).* != @as(c_int, @intCast(bytes.len))) return error.AbiMismatch;
+        const dst_ptr = field(?[*]u8, self.pkt, 24).* orelse return error.NoMem;
+        @memcpy(dst_ptr[0..bytes.len], bytes);
+
+        if (a.avcodec_send_packet(self.ctx, self.pkt) < 0) return error.DecodeFailed;
+
+        var latest: ?DecodedFrame = null;
+        while (a.avcodec_receive_frame(self.ctx, self.frame) == 0) {
+            const fw = frameWidth(self.frame);
+            const fh = frameHeight(self.frame);
+            const ffmt = frameFormat(self.frame);
+            if (fw < 2 or fh < 2 or fw > 4096 or fh > 4096) continue;
+            const w: u16 = @intCast(fw & ~@as(c_int, 1));
+            const h: u16 = @intCast(fh & ~@as(c_int, 1));
+            const y_len = @as(usize, w) * h;
+            const need = y_len + y_len / 2;
+            if (self.nv12_buf.len != need) {
+                if (self.nv12_buf.len > 0) std.heap.page_allocator.free(self.nv12_buf);
+                self.nv12_buf = try std.heap.page_allocator.alloc(u8, need);
+            }
+            const key = [5]c_int{ fw, fh, ffmt, w, h };
+            if (self.sws == null or !std.mem.eql(c_int, &key, &self.sws_key)) {
+                if (self.sws) |s| a.sws_freeContext(s);
+                self.sws = a.sws_getContext(fw, fh, ffmt, w, h, self.nv12_fmt, sws_bilinear, null, null, null);
+                self.sws_key = key;
+            }
+            const sws = self.sws orelse return error.SwsFailed;
+            const dst_planes: [4]?[*]u8 = .{ self.nv12_buf.ptr, self.nv12_buf.ptr + y_len, null, null };
+            const dst_strides: [4]c_int = .{ @intCast(w), @intCast(w), 0, 0 };
+            const src: *const [8]?[*]const u8 = @ptrCast(frameData(self.frame));
+            if (a.sws_scale(sws, src, frameLinesize(self.frame), 0, fh, &dst_planes, &dst_strides) <= 0) continue;
+
+            latest = .{
+                .width = w,
+                .height = h,
+                .y = self.nv12_buf[0..y_len],
+                .uv = self.nv12_buf[y_len..need],
+                .pitch = w,
+            };
+        }
+        return latest;
+    }
+
+    pub fn deinit(self: *RawDecoder) void {
+        if (self.sws) |s| self.api.sws_freeContext(s);
+        var f: ?*Frame = self.frame;
+        self.api.av_frame_free(&f);
+        var p: ?*Packet = self.pkt;
+        self.api.av_packet_free(&p);
+        var ctx: ?*CodecCtx = self.ctx;
+        self.api.avcodec_free_context(&ctx);
+        if (self.nv12_buf.len > 0) {
+            std.heap.page_allocator.free(self.nv12_buf);
+            self.nv12_buf = &.{};
+        }
+    }
+};
 
 fn field(comptime T: type, p: anytype, off: usize) *T {
     return @ptrFromInt(@intFromPtr(p) + off);

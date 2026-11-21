@@ -177,6 +177,8 @@ fn subtypeOf(codec: video_cfg.Codec) GUID {
     return switch (codec) {
         .hevc => com.MFVideoFormat_HEVC,
         .av1 => com.MFVideoFormat_AV1,
+        .vp8 => com.MFVideoFormat_VP80,
+        .vp9 => com.MFVideoFormat_VP90,
         else => com.MFVideoFormat_H264,
     };
 }
@@ -205,6 +207,8 @@ pub fn probeCapabilities() media_if.HwCapability {
     const h264_info: MFT_REGISTER_TYPE_INFO = .{ .guidMajorType = com.MFMediaType_Video, .guidSubtype = com.MFVideoFormat_H264 };
     const hevc_info: MFT_REGISTER_TYPE_INFO = .{ .guidMajorType = com.MFMediaType_Video, .guidSubtype = com.MFVideoFormat_HEVC };
     const av1_info: MFT_REGISTER_TYPE_INFO = .{ .guidMajorType = com.MFMediaType_Video, .guidSubtype = com.MFVideoFormat_AV1 };
+    const vp8_info: MFT_REGISTER_TYPE_INFO = .{ .guidMajorType = com.MFMediaType_Video, .guidSubtype = com.MFVideoFormat_VP80 };
+    const vp9_info: MFT_REGISTER_TYPE_INFO = .{ .guidMajorType = com.MFMediaType_Video, .guidSubtype = com.MFVideoFormat_VP90 };
 
     return .{
         .h264_enc = hasMft(&api, com.MFT_CATEGORY_VIDEO_ENCODER, &nv12_info, &h264_info, true),
@@ -213,6 +217,8 @@ pub fn probeCapabilities() media_if.HwCapability {
         .h264_dec = hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &h264_info, &nv12_info, true) or hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &h264_info, &nv12_info, false),
         .hevc_dec = hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &hevc_info, &nv12_info, true) or hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &hevc_info, &nv12_info, false),
         .av1_dec = hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &av1_info, &nv12_info, true) or hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &av1_info, &nv12_info, false),
+        .vp8_dec = hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &vp8_info, &nv12_info, true) or hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &vp8_info, &nv12_info, false),
+        .vp9_dec = hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &vp9_info, &nv12_info, true) or hasMft(&api, com.MFT_CATEGORY_VIDEO_DECODER, &vp9_info, &nv12_info, false),
         .zero_copy_d3d11 = api.create_dxgi_buf != null and api.create_dxgi_mgr != null,
     };
 }
@@ -327,6 +333,7 @@ pub const HwEncoder = struct {
     hw: bool = false,
     provides_samples: bool = false,
     force_cpu_buf: bool = false,
+    force_kf_armed: bool = false,
     timer_on: bool = false,
     in_id: DWORD = 0,
     out_id: DWORD = 0,
@@ -489,10 +496,22 @@ pub const HwEncoder = struct {
     }
 
     pub fn requestKeyframe(self: *HwEncoder) void {
+        if (self.force_kf_armed) return;
         const capi = self.codec_api orelse return;
         const set_val = com.slot(capi, 9, *const fn (*anyopaque, *const GUID, *const com.VARIANT) callconv(.winapi) HRESULT);
         const force = com.VARIANT.fromU32(1);
-        _ = set_val(capi, &com.CODECAPI_AVEncVideoForceKeyFrame, &force);
+        if (com.succeeded(set_val(capi, &com.CODECAPI_AVEncVideoForceKeyFrame, &force))) {
+            self.force_kf_armed = true;
+        }
+    }
+
+    fn clearForceKeyframe(self: *HwEncoder) void {
+        if (!self.force_kf_armed) return;
+        self.force_kf_armed = false;
+        const capi = self.codec_api orelse return;
+        const set_val = com.slot(capi, 9, *const fn (*anyopaque, *const GUID, *const com.VARIANT) callconv(.winapi) HRESULT);
+        const off = com.VARIANT.fromU32(0);
+        _ = set_val(capi, &com.CODECAPI_AVEncVideoForceKeyFrame, &off);
     }
 
     pub fn setBitrate(self: *HwEncoder, bitrate_kbps: u32) void {
@@ -583,6 +602,7 @@ pub const HwEncoder = struct {
             self.last_hr = hr_in;
             return error.ProcessInputFailed;
         }
+        self.clearForceKeyframe();
         if (self.async.active()) self.async.need_input -|= 1;
 
         return self.readOutput(frame.pts_us, 8);

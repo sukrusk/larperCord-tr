@@ -362,31 +362,57 @@ fn row(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, variant: Variant, cs: any
             const name = ctx.store.nameIn(ch.guild, uid) orelse u.name;
             const speaking = ctx.store.isSpeaking(uid, ctx.now_ms);
             const vf = ctx.store.voiceFlags(uid);
-            // Clicar em quem está na call abre o perfil (botão direito: menu).
+            const is_live = vf.self_stream or ctx.store.streamOf(uid) != null;
+            const live_lbl = i18n.tr("AO VIVO", "LIVE");
+            const live_pill_w: f32 = if (is_live) d.width(fam.get(.bold), 9.5, live_lbl) + 10 else 0;
+            // Clicar em quem está na call abre o perfil (botão direito: menu) ou assiste à stream ao clicar no selo AO VIVO.
             const vr: d.Rect = .{ .x = rr.x + 26, .y = y2, .w = rr.w - 26, .h = if (variant == .tree) 20 else 26 };
             const vh = d.hit(ctx, @truncate(uid *% 31 +% ch.id), vr);
             qa.mark(vr, "voice-member:{d}:{d}", .{ ch.id, uid });
             if (speaking) qa.mark(vr, "voice-speaking:{d}", .{uid});
             if (vf.muted()) qa.mark(vr, "voice-flagged:{d}", .{uid});
-            if (voiceFlagsTip(vf)) |vt| d.tip(ctx, vr, vt, vh.hovered);
+            const ax = rr.x + 40;
+            const acy = y2 + 13;
+            const icons_w = if (variant == .tree) @as(f32, 0) else voiceFlagIconsPreview(vf);
+            const live_r: d.Rect = if (is_live and variant != .tree)
+                .{ .x = vr.right() - 6 - icons_w - live_pill_w - (if (icons_w > 0) @as(f32, 4) else 0), .y = acy - 8.5, .w = live_pill_w, .h = 17 }
+            else
+                .{ .x = vr.x, .y = vr.y, .w = 0, .h = 0 };
+            const on_live = is_live and variant != .tree and live_r.contains(ctx.mouse.x, ctx.mouse.y);
+            if (on_live) {
+                d.tip(ctx, live_r, i18n.tr("Assistir transmissão ao vivo", "Watch live stream"), vh.hovered);
+            } else if (voiceFlagsTip(vf)) |vt| {
+                d.tip(ctx, vr, vt, vh.hovered);
+            }
             if (vh.hovered and variant != .tree) d.rect(dl, vr, ctx.col(.hover), ctx.th.radius);
-            if (vh.clicked) ctx.popup(.{ .profile = .{ .user = uid, .x = vr.right() + 8, .y = vr.y } });
+            if (vh.clicked and on_live) {
+                ctx.act(.{ .watch_member_stream = .{ .channel = ch.id, .owner = uid } });
+            } else if (vh.clicked) {
+                ctx.popup(.{ .profile = .{ .user = uid, .x = vr.right() + 8, .y = vr.y } });
+            }
             if (vh.right) ctx.popup(.{ .menu = .{ .kind = .user, .id = uid, .x = ctx.mouse.x, .y = ctx.mouse.y } });
             switch (variant) {
                 .tree => {
-                    var buf: [80]u8 = undefined;
-                    const t = std.fmt.bufPrint(&buf, "{s}   {s} {s}{s}{s}", .{ if (last) " " else "│", if (speaking) "◉" else "○", name, w.botSuffix(u), voiceFlagsTty(vf) }) catch name;
+                    var buf: [96]u8 = undefined;
+                    const live_s = if (is_live) i18n.tr(" [AO VIVO]", " [LIVE]") else "";
+                    const t = std.fmt.bufPrint(&buf, "{s}   {s} {s}{s}{s}{s}", .{ if (last) " " else "│", if (speaking) "◉" else "○", name, w.botSuffix(u), voiceFlagsTty(vf), live_s }) catch name;
                     d.text(dl, fam.get(.regular), fs - 2, rr.x + 4, y2 + 2, if (speaking) ctx.col(.online) else ctx.col(.muted), t);
                     w.markName(vr, "voice", uid, name);
                     y2 += 20;
                 },
                 else => {
-                    const ax = rr.x + 40;
-                    const acy = y2 + 13;
                     if (speaking) c.ImDrawList_AddCircleEx(dl, d.v(ax, acy), 12.5, ctx.col(.online).u(), 0, 2, 0);
                     w.avatarIn(ctx, dl, ch.guild, ax, acy, 21, uid, .circle, null, 1);
-                    const icons_w = voiceFlagIcons(ctx, dl, vf, vr.right() - 6, acy);
-                    const vn = d.textClipped(dl, fam.get(.medium), 14, ax + 18, acy - 9, if (speaking) ctx.col(.text) else ctx.col(.muted), name, vr.right() - (ax + 18) - icons_w - 6 - w.botTagSpace(ctx, u, false));
+                    const real_icons_w = voiceFlagIcons(ctx, dl, vf, vr.right() - 6, acy);
+                    const reserve_live: f32 = if (is_live) live_pill_w + 6 else 0;
+                    if (is_live) {
+                        const watching = ctx.st.watch_owner == uid;
+                        const pill_col = (if (watching) ctx.col(.online) else ctx.col(.danger)).mix(d.Rgba.white, if (vh.hovered and on_live) 0.16 else 0);
+                        d.rect(dl, live_r, pill_col, 4);
+                        d.text(dl, fam.get(.bold), 9.5, live_r.x + 5, d.centerY(live_r, 9.5), d.Rgba.white, live_lbl);
+                        qa.mark(live_r, "voice-live:{d}", .{uid});
+                    }
+                    const vn = d.textClipped(dl, fam.get(.medium), 14, ax + 18, acy - 9, if (speaking) ctx.col(.text) else ctx.col(.muted), name, vr.right() - (ax + 18) - real_icons_w - reserve_live - 6 - w.botTagSpace(ctx, u, false));
                     w.markName(vr, "voice", uid, name);
                     _ = w.botTag(ctx, dl, ax + 18 + vn, acy, u, false, 1);
                     y2 += 28;
@@ -413,6 +439,13 @@ fn badgeWidth(fam: *d.Family, count: u16) f32 {
     var buf: [8]u8 = undefined;
     const t = std.fmt.bufPrint(&buf, "{d}", .{count}) catch "";
     return d.width(fam.get(.bold), 11, t) + 10;
+}
+
+fn voiceFlagIconsPreview(f: ev.VoiceFlags) f32 {
+    var px_w: f32 = 0;
+    if (f.deafened()) px_w += 22;
+    if (f.self_mute or f.serverMuted()) px_w += 18;
+    return px_w;
 }
 
 /// Mudo e surdo de alguém na lista da call; devolve a largura ocupada.

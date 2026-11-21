@@ -1,5 +1,19 @@
 # Sürüm Notları
 
+## 0.8.2
+
+**Discord Yayını İzleme**
+- Ses kanalı kenar çubuğuna tıklanabilir `[CANLI]` etiketi (`comp_channels.zig`), çağrı kartlarına `▶ CANLI` rozeti (`call_grid.zig`) ve sağ tık **"Yayını İzle"** eylemleri eklendi; tıklandığında kanala katılıp Discord Go Live yayınını otomatik açar (`app.zig`, `popup.zig`).
+- `voice.zig` içindeki izleyici `watch_voice` `OP 0 IDENTIFY` yükü `setWatchStreamMode` ile düzeltildi (izleyicinin boş yayın ilan etmesi engellendi) ve `discord.zig` tarafında `STREAM_CREATE` gelmeden yanlış `watch_rtc_server` tahmini yapılması kaldırıldı.
+- Resmi Discord istemcisi yayınlarını izlemek için `H264` yanında Media Foundation (`VP80`/`VP90`, `mf_codec.zig`) ve FFmpeg `RawDecoder` (`ffmpeg.zig`) ile `VP8`/`VP9`/`AV1` çözme desteği (`video_rtp.zig`, `call_json.zig`) eklendi.
+- `OP 12 VIDEO` mesajlarında `audio_ssrc` için DAVE anahtarı kaydı yapıldı, RFC 4588 RTX paketleri (`unwrapRtx`) açıldı ve `voice.zig::onRtp` içinde 96 altındaki payload türlerinin düşürülmesi düzeltildi.
+
+**Akıcı AnyDesk ve Kameralar**
+- AnyDesk'teki ekran kırpışması ve fare kayması (`remote_ctrl.zig`, `live_video.zig`, `stream_view.zig`) giderildi: `watch_slot` üzerinde P2P ve SFU çakışması engellendi, P2P çözme ayrı `viewerDecMain` iş parçacığına taşındı, `4 MiB` UDP arabelleği ve toplu soket boşaltma eklendi, `mouse_move` birleştirme ile `sendVideoAu` kare başı tek kilit kullanıldı ve kenarlarda giriş iptali yerine `mapViewportToNormalizedClamped` ile sınırlama yapıldı.
+- DXGI ekran kırpışması ve keyframe taşması düzeltildi: `dxgi_cap.zig` üzerinde `Nv12GpuCtx` üçlü arabelleğe alındı, masaüstü güncellenmeden gelen siyah 0. kare atlandı, `mf_codec.zig` `ProcessInput` sonrası `CODECAPI_AVEncVideoForceKeyFrame` sıfırlandı ve bozuk paketler `FrameAssembler.takeAbandoned()` ile yakalandı.
+- Web kamerası donmaları (`live_video.zig`) çözüldü: sıkıştırmasız piksel formatları `MJPG` önüne alındı, `MJPG` için `stbi_load_from_memory` -> NV12 yedek çözücüsü eklendi, 2,5 saniye kilitlenen kamerayı yeniden açan gözcü eklendi ve `pollOutput()` kuyruğu yeni kareden önce boşaltıldı.
+- DAVE geçişleri ve paket kaybındaki SFU kamera donmaları (`voice.zig`) giderildi: katılımcılar arası küresel `dec_wait_key` blokajı kaldırıldı, düşen/eksik/çözülemeyen karelerde SSRC bazlı PLI isteği ve `tx_wait_key` eklendi, `dec_ring` kuyruğu 16 kareye çıkarıldı.
+
 ## 0.8.1
 
 **Video ve Kamera Sekmesi**

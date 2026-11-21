@@ -44,6 +44,7 @@ const video_diag = @import("../platform/video_diag.zig");
 const proxy = @import("proxy.zig");
 const socks5_udp = @import("socks5_udp.zig");
 const dpi = @import("dpi_bypass.zig");
+const ffmpeg = @import("../platform/ffmpeg.zig");
 
 pub var hw_decode_pref: std.atomic.Value(bool) = .init(true);
 pub var pli_epoch: std.atomic.Value(u32) = .init(0);
@@ -303,6 +304,14 @@ pub const Voice = struct {
     pub fn setStreamMode(v: *Voice, stream_key: []const u8) void {
         v.is_stream = true;
         v.video_capable = true;
+        v.stream_key_len = @intCast(@min(stream_key.len, v.stream_key.len - 1));
+        @memcpy(v.stream_key[0..v.stream_key_len], stream_key[0..v.stream_key_len]);
+    }
+
+    /// Modo espectador Go Live: recebe áudio e vídeo sem anunciar transmissão própria em OP 0.
+    pub fn setWatchStreamMode(v: *Voice, stream_key: []const u8) void {
+        v.is_stream = true;
+        v.video_capable = false;
         v.stream_key_len = @intCast(@min(stream_key.len, v.stream_key.len - 1));
         @memcpy(v.stream_key[0..v.stream_key_len], stream_key[0..v.stream_key_len]);
     }
@@ -641,6 +650,7 @@ const Worker = struct {
     video_rtx_ssrc: u32 = 0,
     video_pt: u7 = 101,
     video_rtx_pt: u7 = 102,
+    rx_video_codec: video_cfg.Codec = .h264,
     video_announced: bool = false,
     video_rtp_seq: u16 = 0,
     video_rtx_seq: u16 = 0,
@@ -655,6 +665,7 @@ const Worker = struct {
     recv_video_frames: u64 = 0,
     video_ssrcs: std.AutoHashMapUnmanaged(u32, Id) = .empty,
     video_rtx_ssrcs: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    video_rtx_to_media: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     video_work_buf: []u8 = &.{},
     tx_rtp_cache: []RtpPktSlot = &.{},
     rtp_out_ring: []RtpPktSlot = &.{},
@@ -663,16 +674,15 @@ const Worker = struct {
     rtp_out_count: u16 = 0,
     last_remb_ms: i64 = 0,
     video_rx: [8]VideoRxSlot = @splat(.{}),
-    // Decodificação H.264 assíncrona para nunca travar o UDP/áudio.
+    // Decodificação assíncrona (H.264/VP8/VP9/AV1) para nunca travar o UDP/áudio.
     dec_mu: ?*c.SDL_Mutex = null,
     dec_cond: ?*c.SDL_Condition = null,
     dec_thread: ?*c.SDL_Thread = null,
     dec_stop: std.atomic.Value(bool) = .init(false),
-    dec_ring: [8]DecJob = @splat(.{}),
+    dec_ring: [16]DecJob = @splat(.{}),
     dec_head: u8 = 0,
     dec_tail: u8 = 0,
     dec_count: u8 = 0,
-    dec_wait_key: bool = false,
     dec_drop_user: std.atomic.Value(Id) = .init(0),
     dec_drop_queue: [8]Id = @splat(0),
     dec_drop_n: u8 = 0,
@@ -839,6 +849,7 @@ const Worker = struct {
         w.call_ssrcs.deinit(alloc);
         w.video_ssrcs.deinit(alloc);
         w.video_rtx_ssrcs.deinit(alloc);
+        w.video_rtx_to_media.deinit(alloc);
         for (&w.video_rx) |*rx| {
             if (rx.active and rx.user != 0) media_bridge.clearRemote(rx.user, w.v.is_stream);
             rx.deinit();
@@ -1033,7 +1044,7 @@ const Worker = struct {
             w.v.session[0..w.v.session_len],
             w.v.token[0..w.v.token_len],
             @intCast(c.daveMaxSupportedProtocolVersion()),
-            w.v.video_capable or w.v.is_stream or w.v.video_enabled.load(.acquire),
+            w.v.video_capable or w.v.video_enabled.load(.acquire),
             if (w.v.is_stream) "screen" else "video",
         ) catch return;
         dbg("identify (DAVE até v{d})", .{c.daveMaxSupportedProtocolVersion()});
@@ -1342,10 +1353,14 @@ const Worker = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(alloc);
         const want_video = w.v.video_capable or w.v.is_stream;
-        call_json.writeSelectProtocol(&out, alloc, ip, port, want_video) catch return;
+        const caps = if (want_video) capture_backend.probeCapabilities() else @import("../platform/media_if.zig").HwCapability{};
+        const dec_vp8 = want_video and (caps.vp8_dec or ffmpeg.rawDecoderAvailable(&.{"vp8"}));
+        const dec_vp9 = want_video and (caps.vp9_dec or ffmpeg.rawDecoderAvailable(&.{"vp9"}));
+        const dec_av1 = want_video and (caps.av1_dec or ffmpeg.rawDecoderAvailable(&.{ "libdav1d", "av1" }));
+        call_json.writeSelectProtocolCaps(&out, alloc, ip, port, want_video, dec_vp8, dec_vp9, dec_av1) catch return;
         w.video_pt = 101;
         w.video_rtx_pt = 102;
-        dbg("selectProtocol video={} mode=aead_xchacha20_poly1305_rtpsize pt={d}", .{ want_video, w.video_pt });
+        dbg("selectProtocol video={} mode=aead_xchacha20_poly1305_rtpsize pt={d} vp8={} vp9={} av1={}", .{ want_video, w.video_pt, dec_vp8, dec_vp9, dec_av1 });
         _ = w.sendText(out.items);
     }
 
@@ -1388,6 +1403,9 @@ const Worker = struct {
             w.last_key_req_ms = nowMs();
         }
         w.sendMediaSinkWants(0);
+        for (&w.video_rx) |*rx| {
+            if (rx.active and rx.ssrc != 0) w.sendVideoPli(rx.ssrc);
+        }
     }
 
     fn onSession(w: *Worker, d: std.json.Value) void {
@@ -1405,8 +1423,26 @@ const Worker = struct {
         const vcodec_s = j.str(j.get(d, "video_codec")) orelse "none";
         dbg("sessão pronta (DAVE v{d}, video={s})", .{ dave_ver, vcodec_s });
         if (std.ascii.eqlIgnoreCase(vcodec_s, "H264")) {
-            w.v.video_codec.store(@intFromEnum(video_cfg.Codec.h264), .release);
+            w.rx_video_codec = .h264;
             w.video_pt = 101;
+            w.video_rtx_pt = 102;
+            w.v.video_codec.store(@intFromEnum(video_cfg.Codec.h264), .release);
+        } else if (std.ascii.eqlIgnoreCase(vcodec_s, "VP8")) {
+            w.rx_video_codec = .vp8;
+            w.video_pt = 103;
+            w.video_rtx_pt = 104;
+        } else if (std.ascii.eqlIgnoreCase(vcodec_s, "VP9")) {
+            w.rx_video_codec = .vp9;
+            w.video_pt = 105;
+            w.video_rtx_pt = 106;
+        } else if (std.ascii.eqlIgnoreCase(vcodec_s, "H265") or std.ascii.eqlIgnoreCase(vcodec_s, "HEVC")) {
+            w.rx_video_codec = .hevc;
+            w.video_pt = 107;
+            w.video_rtx_pt = 108;
+        } else if (std.ascii.eqlIgnoreCase(vcodec_s, "AV1") or std.ascii.eqlIgnoreCase(vcodec_s, "AV1X")) {
+            w.rx_video_codec = .av1;
+            w.video_pt = 109;
+            w.video_rtx_pt = 110;
         }
         if (dave_ver > 0 and w.dave == null) {
             w.initDave(dave_ver);
@@ -1465,10 +1501,16 @@ const Worker = struct {
     fn registerRemoteVideoSsrc(w: *Worker, ssrc: u32, rtx_ssrc: u32, uid: Id) void {
         w.addCallUser(uid);
         w.video_ssrcs.put(alloc, ssrc, uid) catch {};
-        if (rtx_ssrc != 0) w.video_rtx_ssrcs.put(alloc, rtx_ssrc, {}) catch {};
+        if (rtx_ssrc != 0) {
+            w.video_rtx_ssrcs.put(alloc, rtx_ssrc, {}) catch {};
+            w.video_rtx_to_media.put(alloc, rtx_ssrc, ssrc) catch {};
+        }
         if (w.dave) |*dave| dave.setSsrcUser(ssrc, uid);
         for (&w.video_rx) |*rx| if (rx.active and rx.ssrc == ssrc) {
-            rx.user = uid;
+            if (rx.user != uid) {
+                rx.user = uid;
+                rx.got_keyframe = false;
+            }
         };
     }
 
@@ -1476,6 +1518,12 @@ const Worker = struct {
         const uid = j.id(j.get(d, "user_id")) orelse return;
         if (uid == w.v.user) return;
         w.addCallUser(uid);
+        const top_a: u32 = @intCast(std.math.clamp(j.int(j.get(d, "audio_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
+        if (top_a != 0) {
+            w.call_ssrcs.put(alloc, top_a, uid) catch {};
+            _ = w.sourceFor(top_a, uid);
+            if (w.dave) |*dave| dave.setSsrcUser(top_a, uid);
+        }
         const top_v: u32 = @intCast(std.math.clamp(j.int(j.get(d, "video_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
         const top_r: u32 = @intCast(std.math.clamp(j.int(j.get(d, "rtx_ssrc")) orelse 0, 0, std.math.maxInt(u32)));
         var primary: u32 = 0;
@@ -1671,6 +1719,8 @@ const Worker = struct {
                 dave.setLocalVideoSsrc(w.video_ssrc, dcodec);
                 const enc_n = dave.encryptMedia(c.DAVE_MEDIA_TYPE_VIDEO, w.video_ssrc, payload, dst);
                 if (enc_n == 0) {
+                    w.v.tx_wait_key = true;
+                    w.v.video_keyframe_req.store(true, .release);
                     video_diag.txSkip(4);
                     continue;
                 }
@@ -2120,11 +2170,10 @@ const Worker = struct {
         const ssrc = std.mem.readInt(u32, buf[8..12], .big);
         if (ssrc == w.ssrc or (w.video_ssrc != 0 and ssrc == w.video_ssrc)) return;
         const is_audio = pt == 120;
-        const is_rtx = (pt == w.video_rtx_pt) or w.video_rtx_ssrcs.contains(ssrc) or ((pt == 97 or pt == 99) and !w.video_ssrcs.contains(ssrc));
-        if (is_rtx) return;
-        const is_video = !is_audio and (pt == w.video_pt or (pt >= 96 and w.video_ssrcs.contains(ssrc)));
-        if (!is_audio and !is_video) return;
-        if (is_video) video_diag.rxUdpPkt(pt);
+        const is_rtx = !is_audio and ((pt == w.video_rtx_pt) or w.video_rtx_ssrcs.contains(ssrc) or ((pt == 97 or pt == 99 or pt == 102 or pt == 104 or pt == 106 or pt == 108 or pt == 110) and !w.video_ssrcs.contains(ssrc)));
+        const is_video = !is_audio and !is_rtx and (pt == w.video_pt or w.video_ssrcs.contains(ssrc));
+        if (!is_audio and !is_video and !is_rtx) return;
+        if (is_video or is_rtx) video_diag.rxUdpPkt(pt);
         // Nos modos "rtpsize" só o cabeçalho fixo, os CSRC e os 4 bytes do
         // cabeçalho da extensão vão em claro; o corpo da extensão vai
         // cifrado junto com o áudio e sai depois de decifrar.
@@ -2157,6 +2206,14 @@ const Worker = struct {
         if (ext_words * 4 > end) return;
         var frame: []const u8 = plain[ext_words * 4 .. end];
         if (frame.len == 0) return;
+        if (is_rtx) {
+            const orig_ssrc = w.video_rtx_to_media.get(ssrc) orelse return;
+            const un = video_rtp.unwrapRtx(frame) orelse return;
+            const ts = std.mem.readInt(u32, buf[4..8], .big);
+            const marker = (buf[1] & 0x80) != 0;
+            w.onVideoRtp(orig_ssrc, un.orig_seq, ts, marker, un.orig_payload);
+            return;
+        }
         if (is_video) {
             const seq = std.mem.readInt(u16, buf[2..4], .big);
             const ts = std.mem.readInt(u32, buf[4..8], .big);
@@ -2494,28 +2551,33 @@ const Worker = struct {
         const rx = slot orelse return;
         if (uid != 0 and rx.user == 0) rx.user = uid;
 
-        switch (rx.assembler.pushH264(seq, ts, marker, payload)) {
+        const vcodec = w.rx_video_codec;
+        switch (rx.assembler.pushPacket(vcodec, seq, ts, marker, payload)) {
             .pending => {},
             .dropped => |d| {
                 video_diag.rxAsmDrop();
+                rx.got_keyframe = false;
                 if (d.need_pli) {
                     const now = nowMs();
-                    if (now - rx.last_pli_ms >= 250) {
+                    if (now - rx.last_pli_ms >= 150) {
                         rx.last_pli_ms = now;
                         w.sendVideoPli(ssrc);
-                        if (!rx.got_keyframe) w.sendMediaSinkWants(ssrc);
+                        w.sendMediaSinkWants(ssrc);
                     }
                 }
             },
             .frame => |au_raw| {
                 video_diag.rxAsmFrame();
+                const had_abandoned = rx.assembler.takeAbandoned();
                 var au = au_raw;
                 if (au.len >= 2 and au[au.len - 1] == 0xFA and au[au.len - 2] == 0xFA) {
                     const dave = if (w.dave) |*d| d else {
+                        rx.got_keyframe = false;
                         video_diag.rxDaveFail();
                         return;
                     };
                     if (rx.user == 0) {
+                        rx.got_keyframe = false;
                         video_diag.rxNoUid();
                         return;
                     }
@@ -2527,19 +2589,28 @@ const Worker = struct {
                     }
                     const dec_len = dave.decryptMedia(c.DAVE_MEDIA_TYPE_VIDEO, ssrc, rx.user, au, rx.dave_buf) orelse {
                         w.stats.undecrypted += 1;
+                        rx.got_keyframe = false;
                         video_diag.rxDaveFail();
+                        const now = nowMs();
+                        if (now - rx.last_pli_ms >= 200) {
+                            rx.last_pli_ms = now;
+                            w.sendVideoPli(ssrc);
+                        }
                         return;
                     };
                     video_diag.rxDaveOk();
                     au = rx.dave_buf[0..dec_len];
                 }
-                const is_key = hasH264Keyframe(au);
+                const is_key = video_rtp.isKeyframe(vcodec, au, rx.assembler.frame_key_hint);
+                if (had_abandoned and !is_key) {
+                    rx.got_keyframe = false;
+                }
                 if (!rx.got_keyframe) {
                     if (is_key) {
                         rx.got_keyframe = true;
                     } else {
                         const now = nowMs();
-                        if (now - rx.last_pli_ms >= 250) {
+                        if (now - rx.last_pli_ms >= 150) {
                             rx.last_pli_ms = now;
                             w.sendVideoPli(ssrc);
                             w.sendMediaSinkWants(ssrc);
@@ -2548,9 +2619,10 @@ const Worker = struct {
                     }
                 }
                 const pts_us: i64 = @divTrunc(@as(i64, ts) * 1000, 90);
-                if (!w.enqueueDecode(rx.user, ssrc, pts_us, is_key, au)) {
+                if (!w.enqueueDecode(rx.user, ssrc, vcodec, pts_us, is_key, au)) {
+                    rx.got_keyframe = false;
                     const now = nowMs();
-                    if (now - rx.last_pli_ms >= 250) {
+                    if (now - rx.last_pli_ms >= 150) {
                         rx.last_pli_ms = now;
                         w.sendVideoPli(ssrc);
                     }
@@ -2587,7 +2659,6 @@ const Worker = struct {
         w.dec_head = 0;
         w.dec_tail = 0;
         w.dec_count = 0;
-        w.dec_wait_key = false;
         if (w.dec_cond) |cd| {
             c.SDL_DestroyCondition(cd);
             w.dec_cond = null;
@@ -2598,24 +2669,21 @@ const Worker = struct {
         }
     }
 
-    fn enqueueDecode(w: *Worker, user: Id, ssrc: u32, pts_us: i64, is_key: bool, au: []const u8) bool {
+    fn enqueueDecode(w: *Worker, user: Id, ssrc: u32, codec: video_cfg.Codec, pts_us: i64, is_key: bool, au: []const u8) bool {
         if (au.len == 0 or !w.ensureDecWorker()) return false;
         const mu = w.dec_mu orelse return false;
         const cond = w.dec_cond orelse return false;
         c.SDL_LockMutex(mu);
         defer c.SDL_UnlockMutex(mu);
-        if (w.dec_wait_key and !is_key) return false;
         if (w.dec_count == w.dec_ring.len) {
             if (is_key) {
                 w.dec_head = 0;
                 w.dec_tail = 0;
                 w.dec_count = 0;
             } else {
-                w.dec_wait_key = true;
                 return false;
             }
         }
-        if (is_key) w.dec_wait_key = false;
         const job = &w.dec_ring[w.dec_tail];
         if (job.buf.len < au.len) {
             const next = std.heap.page_allocator.alloc(u8, @max(au.len, 256 * 1024)) catch return false;
@@ -2626,6 +2694,7 @@ const Worker = struct {
         job.len = au.len;
         job.user = user;
         job.ssrc = ssrc;
+        job.codec = codec;
         job.pts_us = pts_us;
         job.is_key = is_key;
         w.dec_tail = (w.dec_tail + 1) % @as(u8, @intCast(w.dec_ring.len));
@@ -2635,13 +2704,23 @@ const Worker = struct {
     }
 };
 
+fn ffDecoderNames(codec: video_cfg.Codec) []const [*:0]const u8 {
+    return switch (codec) {
+        .vp8 => &.{"vp8"},
+        .vp9 => &.{"vp9"},
+        .av1 => &.{ "libdav1d", "av1" },
+        .hevc => &.{"hevc"},
+        else => &.{"h264"},
+    };
+}
+
 fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     const w: *Worker = @ptrCast(@alignCast(data.?));
     const mu = w.dec_mu orelse return 0;
     const cond = w.dec_cond orelse return 0;
 
     var slots: [8]DecSlot = @splat(.{});
-    defer for (&slots) |*ds| if (ds.active) ds.dec.deinit();
+    defer for (&slots) |*ds| ds.deinit();
 
     var local_au: []u8 = &.{};
     defer if (local_au.len > 0) std.heap.page_allocator.free(local_au);
@@ -2674,8 +2753,7 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
             c.SDL_UnlockMutex(mu);
             for (drop_local[0..drop_n]) |uid| {
                 for (&slots) |*ds| if (ds.active and ds.user == uid) {
-                    ds.dec.deinit();
-                    ds.* = .{};
+                    ds.deinit();
                 };
             }
             @import("../platform/mem_tune.zig").compact();
@@ -2685,6 +2763,7 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         const j_len = job.len;
         const j_user = job.user;
         const j_ssrc = job.ssrc;
+        const j_codec = job.codec;
         const j_pts = job.pts_us;
         if (local_au.len < j_len) {
             const next = std.heap.page_allocator.alloc(u8, @max(j_len, 256 * 1024)) catch {
@@ -2704,44 +2783,75 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         var target: ?*DecSlot = null;
         for (&slots) |*ds| {
             if (ds.active and ds.ssrc == j_ssrc) {
-                if (j_user != 0) ds.user = j_user;
-                target = ds;
+                if (ds.codec != j_codec) {
+                    ds.deinit();
+                } else {
+                    if (j_user != 0) ds.user = j_user;
+                    target = ds;
+                }
                 break;
             }
         }
         if (target == null) {
             for (&slots) |*ds| {
                 if (!ds.active) {
-                    const dec = capture_backend.HwDecoder.openPref(.h264, 1920, 1080, null, hw_decode_pref.load(.acquire)) catch break;
-                    ds.* = .{ .active = true, .ssrc = j_ssrc, .user = j_user, .dec = dec };
-                    target = ds;
+                    if (capture_backend.HwDecoder.openPref(j_codec, 1920, 1080, null, hw_decode_pref.load(.acquire))) |dec| {
+                        ds.* = .{ .active = true, .ssrc = j_ssrc, .user = j_user, .codec = j_codec, .hw_dec = dec };
+                        target = ds;
+                    } else |_| if (ffmpeg.RawDecoder.open(ffDecoderNames(j_codec))) |ff| {
+                        ds.* = .{ .active = true, .ssrc = j_ssrc, .user = j_user, .codec = j_codec, .ff_dec = ff };
+                        target = ds;
+                    } else |_| {}
                     break;
                 }
             }
         }
         if (target) |ds| {
             video_diag.rxDecIn();
-            if (ds.dec.decode(local_au[0..j_len], j_pts)) |maybe_df| {
-                if (maybe_df) |df| {
-                    video_diag.rxDecOut(ds.dec.hw, ds.dec.last_hr, df.width, df.height);
-                    if (!logged_first) {
-                        logged_first = true;
-                        dbg("primeiro quadro de vídeo decodificado peer={d} {d}x{d} stream={}", .{ j_user, df.width, df.height, w.v.is_stream });
-                    }
-                    c.SDL_LockMutex(w.v.video_mu);
-                    const cb = w.v.on_video_frame;
-                    const ctx = w.v.on_video_ctx;
-                    c.SDL_UnlockMutex(w.v.video_mu);
+            const emit_fn = struct {
+                fn deliver(wr: *Worker, user: Id, codec: video_cfg.Codec, width: u16, height: u16, y: []const u8, yp: usize, uv: []const u8, uvp: usize) void {
+                    c.SDL_LockMutex(wr.v.video_mu);
+                    const cb = wr.v.on_video_frame;
+                    const ctx = wr.v.on_video_ctx;
+                    c.SDL_UnlockMutex(wr.v.video_mu);
                     if (cb) |f| {
-                        f(ctx, j_user, w.v.is_stream, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, nowMs());
+                        f(ctx, user, wr.v.is_stream, width, height, y, yp, uv, uvp, codec, nowMs());
                     } else {
-                        media_bridge.deliverRemote(j_user, w.v.is_stream, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, nowMs());
+                        media_bridge.deliverRemote(user, wr.v.is_stream, width, height, y, yp, uv, uvp, codec, nowMs());
                     }
-                } else {
-                    video_diag.rxDecErr(ds.dec.hw, ds.dec.last_hr);
                 }
-            } else |_| {
-                video_diag.rxDecErr(ds.dec.hw, ds.dec.last_hr);
+            }.deliver;
+
+            if (ds.hw_dec) |*hdc| {
+                if (hdc.decode(local_au[0..j_len], j_pts)) |maybe_df| {
+                    if (maybe_df) |df| {
+                        video_diag.rxDecOut(hdc.hw, hdc.last_hr, df.width, df.height);
+                        if (!logged_first) {
+                            logged_first = true;
+                            dbg("primeiro quadro decodificado peer={d} {d}x{d} ({s}) stream={}", .{ j_user, df.width, df.height, j_codec.name(), w.v.is_stream });
+                        }
+                        emit_fn(w, j_user, j_codec, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch);
+                    } else {
+                        video_diag.rxDecErr(hdc.hw, hdc.last_hr);
+                    }
+                } else |_| {
+                    video_diag.rxDecErr(hdc.hw, hdc.last_hr);
+                }
+            } else if (ds.ff_dec) |*fdc| {
+                if (fdc.decode(local_au[0..j_len])) |maybe_ff| {
+                    if (maybe_ff) |df| {
+                        video_diag.rxDecOut(false, 0, df.width, df.height);
+                        if (!logged_first) {
+                            logged_first = true;
+                            dbg("primeiro quadro FFmpeg decodificado peer={d} {d}x{d} ({s}) stream={}", .{ j_user, df.width, df.height, j_codec.name(), w.v.is_stream });
+                        }
+                        emit_fn(w, j_user, j_codec, df.width, df.height, df.y, df.pitch, df.uv, df.pitch);
+                    } else {
+                        video_diag.rxDecErr(false, 0);
+                    }
+                } else |_| {
+                    video_diag.rxDecErr(false, 0);
+                }
             }
         }
     }
@@ -2769,6 +2879,7 @@ const VideoTxPkt = struct {
 const DecJob = struct {
     ssrc: u32 = 0,
     user: Id = 0,
+    codec: video_cfg.Codec = .h264,
     pts_us: i64 = 0,
     is_key: bool = false,
     len: usize = 0,
@@ -2779,19 +2890,16 @@ const DecSlot = struct {
     active: bool = false,
     ssrc: u32 = 0,
     user: Id = 0,
-    dec: capture_backend.HwDecoder = undefined,
-};
+    codec: video_cfg.Codec = .h264,
+    hw_dec: ?capture_backend.HwDecoder = null,
+    ff_dec: ?ffmpeg.RawDecoder = null,
 
-fn hasH264Keyframe(au: []const u8) bool {
-    var nals: [32][]const u8 = undefined;
-    const count = video_rtp.splitAnnexBNals(au, &nals);
-    for (nals[0..count]) |nal| {
-        if (nal.len == 0) continue;
-        const nt = nal[0] & 0x1F;
-        if (nt == 5 or nt == 7) return true;
+    fn deinit(ds: *DecSlot) void {
+        if (ds.hw_dec) |*hdc| hdc.deinit();
+        if (ds.ff_dec) |*fdc| fdc.deinit();
+        ds.* = .{};
     }
-    return false;
-}
+};
 
 const VideoRxSlot = struct {
     active: bool = false,

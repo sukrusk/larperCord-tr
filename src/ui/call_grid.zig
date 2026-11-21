@@ -149,13 +149,14 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
     const hb = d.hit(ctx, 8900 + idx, r);
     if (hb.hovered) d.rect(dl, r, ink.alpha(0.06), radius);
     qa.mark(r, "grid-tile:{d}", .{uid});
-    const lt = i18n.tr("AO VIVO", "LIVE");
+    const is_live = vf.self_stream or ctx.store.streamOf(uid) != null;
+    const lt = i18n.tr("▶ AO VIVO", "▶ LIVE");
     const lf = ctx.ui.get(.bold);
-    const live_r: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 12, .h = 20 };
-    const cam_exp_r: d.Rect = .{ .x = r.x + 10, .y = if (vf.self_stream) r.y + 34 else r.y + 10, .w = 24, .h = 24 };
+    const live_r: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 14, .h = 22 };
+    const cam_exp_r: d.Rect = .{ .x = r.x + 10, .y = if (is_live) r.y + 36 else r.y + 10, .w = 24, .h = 24 };
     const peer_slot = if (!mine) live_video.eng.peerCamSlot(uid) else null;
     const cam_slot_opt: ?*live_video.FrameSlot = if (mine and ctx.st.cam_on) &live_video.eng.cam_slot else peer_slot;
-    if (hb.clicked and vf.self_stream and live_r.contains(ctx.mouse.x, ctx.mouse.y)) {
+    if (hb.clicked and is_live and live_r.contains(ctx.mouse.x, ctx.mouse.y)) {
         ctx.act(.{ .watch_stream = uid });
     } else if (hb.clicked and cam_slot_opt != null and cam_exp_r.contains(ctx.mouse.x, ctx.mouse.y)) {
         ctx.st.spotlight_cam = if (ctx.st.spotlight_cam == uid) 0 else uid;
@@ -255,14 +256,15 @@ fn tile(ctx: *d.Ctx, dl: *c.ImDrawList, look: Look, guild: Id, uid: Id, r: d.Rec
         }
     }
 
-    // Transmitindo: só o selo (assistir fica de fora).
-    if (vf.self_stream) {
-        const lr: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, lt) + 12, .h = 20 };
+    // Transmitindo: botão de assistir destacado.
+    if (is_live) {
         const spotlight = ctx.st.watch_owner == uid;
-        d.rect(dl, lr, if (spotlight) ctx.col(.online) else ctx.col(.danger), 5);
-        d.text(dl, lf, 11, lr.x + 6, d.centerY(lr, 11), d.Rgba.white, lt);
-        qa.mark(lr, "grid-live:{d}", .{uid});
-        if (lr.contains(ctx.mouse.x, ctx.mouse.y)) d.tip(ctx, lr, i18n.tr("Assistir transmissão 4K", "Watch 4K stream"), true);
+        const base_lcol = if (spotlight) ctx.col(.online) else ctx.col(.danger);
+        const lhov = hb.hovered and live_r.contains(ctx.mouse.x, ctx.mouse.y);
+        d.rect(dl, live_r, base_lcol.mix(d.Rgba.white, if (lhov) 0.16 else 0), 5);
+        d.text(dl, lf, 11, live_r.x + 7, d.centerY(live_r, 11), d.Rgba.white, lt);
+        qa.mark(live_r, "grid-live:{d}", .{uid});
+        if (lhov) d.tip(ctx, live_r, i18n.tr("Assistir transmissão ao vivo", "Watch live stream"), true);
     } else if (!mine and vf.self_video and !drew_cam) {
         const ct = "CAM";
         const cr_b: d.Rect = .{ .x = r.x + 10, .y = r.y + 10, .w = d.width(lf, 11, ct) + 12, .h = 20 };

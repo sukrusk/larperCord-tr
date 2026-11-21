@@ -242,11 +242,13 @@ pub const Engine = struct {
     peer_cams: [4]PeerCam = @splat(.{}),
 
     cam: ?*c.SDL_Camera = null,
+    cam_mu: ?*c.SDL_Mutex = null,
     cam_subsys: bool = false,
     cam_denied: bool = false,
     cam_synthetic: bool = false,
     cam_synthetic_frame: u64 = 0,
     cam_last_ms: i64 = 0,
+    p2p_video_ms: std.atomic.Value(i64) = .init(0),
     cam_res: video_cfg.Resolution = .p720,
     cam_fps: u8 = 30,
     cam_perf: video_cfg.PerfPreset = .balanced,
@@ -325,10 +327,11 @@ pub const Engine = struct {
     }
 
     fn fmtRank(fmt: c.SDL_PixelFormat) u8 {
-        if (fmt == c.SDL_PIXELFORMAT_NV12) return 4;
-        if (fmt == c.SDL_PIXELFORMAT_IYUV or fmt == c.SDL_PIXELFORMAT_YV12 or fmt == c.SDL_PIXELFORMAT_NV21) return 3;
-        if (fmt == c.SDL_PIXELFORMAT_YUY2 or fmt == c.SDL_PIXELFORMAT_UYVY) return 2;
-        return 1;
+        if (fmt == c.SDL_PIXELFORMAT_NV12) return 5;
+        if (fmt == c.SDL_PIXELFORMAT_IYUV or fmt == c.SDL_PIXELFORMAT_YV12 or fmt == c.SDL_PIXELFORMAT_NV21) return 4;
+        if (fmt == c.SDL_PIXELFORMAT_YUY2 or fmt == c.SDL_PIXELFORMAT_UYVY) return 3;
+        if (fmt == c.SDL_PIXELFORMAT_MJPG) return 0;
+        return 2;
     }
 
     fn isBetterSpec(cand: c.SDL_CameraSpec, best: c.SDL_CameraSpec, req_w: i64, req_h: i64, req_fps: i64) bool {
@@ -344,6 +347,10 @@ pub const Engine = struct {
         const c_usable = c_fps >= 15;
         const b_usable = b_fps >= 15;
         if (c_usable != b_usable) return c_usable;
+
+        const c_uncomp = fmtRank(cand.format) > 0;
+        const b_uncomp = fmtRank(best.format) > 0;
+        if (c_uncomp != b_uncomp) return c_uncomp;
 
         const c_fits = cw <= req_w and ch <= req_h;
         const b_fits = bw <= req_w and bh <= req_h;
@@ -393,6 +400,7 @@ pub const Engine = struct {
 
     pub fn startCamera(self: *Engine, dev_index: u8, res: video_cfg.Resolution, fps: u8, allow_demo_fallback: bool) bool {
         self.stopCamera();
+        if (self.cam_mu == null) self.cam_mu = c.SDL_CreateMutex();
         self.cam_dev_idx = dev_index;
         self.cam_res = res;
         self.cam_fps = if (fps >= 45) 60 else if (fps <= 20) 15 else 30;
@@ -443,10 +451,12 @@ pub const Engine = struct {
             c.SDL_WaitThread(t, null);
             self.cam_cap_thread = null;
         }
+        if (self.cam_mu) |m| _ = c.SDL_LockMutex(m);
         if (self.cam) |cam| {
             c.SDL_CloseCamera(cam);
             self.cam = null;
         }
+        if (self.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
         self.stopCamEncWorker();
         if (self.cam_conv_buf.len > 0) {
             nv12_pattern.freeNv12(&self.cam_conv_buf);
@@ -503,6 +513,23 @@ pub const Engine = struct {
         return null;
     }
 
+    pub fn onP2pRemoteVideoFrame(
+        self: *Engine,
+        w: u16,
+        h: u16,
+        y: []const u8,
+        y_pitch: usize,
+        uv: []const u8,
+        uv_pitch: usize,
+        codec: video_cfg.Codec,
+        pts_ms: i64,
+    ) void {
+        self.p2p_video_ms.store(pts_ms, .release);
+        self.watch_slot.uploadNv12(w, h, y, @intCast(y_pitch), uv, @intCast(uv_pitch), .screen, codec, pts_ms);
+        video_diag.uiUpload(true);
+        self.notifyFrame();
+    }
+
     pub fn onRemoteVideoFrame(
         self: *Engine,
         peer: u64,
@@ -517,6 +544,11 @@ pub const Engine = struct {
         pts_ms: i64,
     ) void {
         if (is_stream) {
+            // Evita corrida e flicker entre quadros P2P diretos e stream SFU no mesmo watch_slot.
+            if (peer != 0 and remote_ctrl.mgr.activeViewer()) {
+                const last_p2p = self.p2p_video_ms.load(.acquire);
+                if (last_p2p != 0 and pts_ms - last_p2p < 2000) return;
+            }
             self.watch_slot.uploadNv12(w, h, y, @intCast(y_pitch), uv, @intCast(uv_pitch), .screen, codec, pts_ms);
             video_diag.uiUpload(true);
             self.notifyFrame();
@@ -547,6 +579,7 @@ pub const Engine = struct {
 
     pub fn clearRemoteVideo(self: *Engine, peer: u64, is_stream: bool) void {
         if (is_stream) {
+            self.p2p_video_ms.store(0, .release);
             if (self.demo_thread == null) {
                 self.watch_slot.clear();
                 self.notifyFrame();
@@ -637,6 +670,7 @@ pub const Engine = struct {
             self.demo_thread = null;
         }
         self.watch_slot.clear();
+        self.p2p_video_ms.store(0, .release);
     }
 
     pub fn tick(self: *Engine, now_ms: i64) void {
@@ -873,6 +907,27 @@ pub const Engine = struct {
             return;
         }
 
+        if (surf.format == c.SDL_PIXELFORMAT_MJPG and surf.pitch > 0) {
+            var jw: c_int = 0;
+            var jh: c_int = 0;
+            var comp: c_int = 0;
+            if (c.stbi_load_from_memory(@ptrCast(surf.pixels.?), surf.pitch, &jw, &jh, &comp, 4)) |px| {
+                defer c.stbi_image_free(px);
+                if (jw >= 2 and jh >= 2) {
+                    const rw: u16 = @intCast(@min(jw, 4096) & ~@as(c_int, 1));
+                    const rh: u16 = @intCast(@min(jh, 4096) & ~@as(c_int, 1));
+                    if (self.ensureCamConvBuf(rw, rh)) {
+                        const y_len = @as(usize, rw) * rh;
+                        rgbaToNv12(px, @intCast(@as(usize, @intCast(jw)) * 4), rw, rh, self.cam_conv_buf);
+                        self.cam_slot.uploadNv12(rw, rh, self.cam_conv_buf[0..y_len], rw, self.cam_conv_buf[y_len..], rw, .camera, .h264, now_ms);
+                        self.notifyFrame();
+                        self.emitCameraEncoded(rw, rh, self.cam_conv_buf[0..y_len], rw, self.cam_conv_buf[y_len..], rw, now_ms * 1000);
+                    }
+                }
+            }
+            return;
+        }
+
         const conv = c.SDL_ConvertSurface(surf, c.SDL_PIXELFORMAT_NV12) orelse return;
         defer c.SDL_DestroySurface(conv);
         const cs: *c.SDL_Surface = @ptrCast(conv);
@@ -929,6 +984,10 @@ pub const Engine = struct {
         if (self.tx_mu) |m| {
             c.SDL_DestroyMutex(m);
             self.tx_mu = null;
+        }
+        if (self.cam_mu) |m| {
+            c.SDL_DestroyMutex(m);
+            self.cam_mu = null;
         }
     }
 
@@ -1057,6 +1116,11 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
         if (cb) |tx_fn| {
             if (enc_opt) |*e| {
+                while (e.pollOutput(pts_us)) |epkt| {
+                    if (epkt.is_keyframe) cam_sticky_kf = false;
+                    video_diag.txEnc(e.hw, w, h);
+                    tx_fn(ctx, epkt.codec, pts_us, epkt.is_keyframe, epkt.data);
+                }
                 if (kcb) |kf| if (kf(ctx)) {
                     cam_sticky_kf = true;
                 };
@@ -1087,14 +1151,52 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+fn rgbaToNv12(rgba: [*]const u8, rgba_pitch: usize, w: u16, h: u16, dst_nv12: []u8) void {
+    const wu: usize = w;
+    const hu: usize = h;
+    const y_len = wu * hu;
+    const dst_y = dst_nv12[0..y_len];
+    const dst_uv = dst_nv12[y_len..];
+    var r: usize = 0;
+    while (r < hu) : (r += 1) {
+        const srow = rgba + r * rgba_pitch;
+        const yrow = dst_y[r * wu ..][0..wu];
+        const uv_even = (r & 1) == 0;
+        const uvrow = if (uv_even) dst_uv[(r / 2) * wu ..][0..wu] else undefined;
+        var cx: usize = 0;
+        while (cx < wu) : (cx += 1) {
+            const p = cx * 4;
+            const R: i32 = srow[p + 0];
+            const G: i32 = srow[p + 1];
+            const B: i32 = srow[p + 2];
+            const y_val = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+            yrow[cx] = @intCast(std.math.clamp(y_val, 0, 255));
+            if (uv_even and (cx & 1) == 0) {
+                const u_val = ((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128;
+                const v_val = ((112 * R - 94 * G - 18 * B + 128) >> 8) + 128;
+                uvrow[cx] = @intCast(std.math.clamp(u_val, 0, 255));
+                uvrow[cx + 1] = @intCast(std.math.clamp(v_val, 0, 255));
+            }
+        }
+    }
+}
+
 fn camCapThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     const engine: *Engine = @ptrCast(@alignCast(data.?));
     sys.beginHiResTimer();
     defer sys.endHiResTimer();
+    var last_frame_ms: u64 = c.SDL_GetTicks();
+    var reopened = false;
     while (!engine.cam_cap_stop.load(.acquire)) {
-        const cam = engine.cam orelse break;
-        const perm = c.SDL_GetCameraPermissionState(cam);
+        if (engine.cam_mu) |m| _ = c.SDL_LockMutex(m);
+        const cam = engine.cam;
+        if (cam == null) {
+            if (engine.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
+            break;
+        }
+        const perm = c.SDL_GetCameraPermissionState(cam.?);
         if (perm == c.SDL_CAMERA_PERMISSION_STATE_DENIED) {
+            if (engine.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
             engine.cam_denied = true;
             engine.notifyFrame();
             break;
@@ -1103,15 +1205,37 @@ fn camCapThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         if (perm == c.SDL_CAMERA_PERMISSION_STATE_APPROVED) {
             var latest: ?*c.SDL_Surface = null;
             var ts: u64 = 0;
-            while (c.SDL_AcquireCameraFrame(cam, &ts)) |surf| {
-                if (latest) |old| c.SDL_ReleaseCameraFrame(cam, old);
+            while (c.SDL_AcquireCameraFrame(cam.?, &ts)) |surf| {
+                if (latest) |old| c.SDL_ReleaseCameraFrame(cam.?, old);
                 latest = surf;
             }
             if (latest) |surf| {
-                defer c.SDL_ReleaseCameraFrame(cam, surf);
+                defer c.SDL_ReleaseCameraFrame(cam.?, surf);
+                if (engine.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
                 engine.consumeCameraSurface(surf, @intCast(c.SDL_GetTicks()));
+                last_frame_ms = c.SDL_GetTicks();
+                reopened = false;
                 got_any = true;
+            } else {
+                const now_ms = c.SDL_GetTicks();
+                if (!reopened and now_ms - last_frame_ms >= 2500) {
+                    reopened = true;
+                    last_frame_ms = now_ms;
+                    var count: c_int = 0;
+                    if (c.SDL_GetCameras(&count)) |ids| {
+                        defer c.SDL_free(ids);
+                        if (count > 0) {
+                            const idx: usize = @min(@as(usize, engine.cam_dev_idx), @as(usize, @intCast(count - 1)));
+                            c.SDL_CloseCamera(cam.?);
+                            engine.cam = c.SDL_OpenCamera(ids[idx], null);
+                        }
+                    }
+                }
+                if (engine.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
             }
+        } else {
+            if (engine.cam_mu) |m| _ = c.SDL_UnlockMutex(m);
+            last_frame_ms = c.SDL_GetTicks();
         }
         c.SDL_Delay(if (got_any) 1 else 4);
     }
@@ -1296,6 +1420,11 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                     if (enc_opt) |*e| e.requestKeyframe();
                 }
                 if (enc_opt) |*e| {
+                    while (e.pollOutput(pts_us)) |epkt| {
+                        if (epkt.is_keyframe) sticky_kf = false;
+                        video_diag.txEnc(e.hw, f.width, f.height);
+                        tx_fn(stx_ctx, epkt.codec, pts_us, epkt.is_keyframe, epkt.data);
+                    }
                     if (req_kf) e.requestKeyframe();
                     if (t0 - last_br_check_ms >= 500) {
                         last_br_check_ms = t0;
