@@ -12,6 +12,7 @@ const capture_backend = @import("../platform/capture_backend.zig");
 const media_if = @import("../platform/media_if.zig");
 const sys = @import("../platform/sys.zig");
 const video_diag = @import("../platform/video_diag.zig");
+const remote_ctrl = @import("../net/remote_ctrl.zig");
 
 pub var eng: Engine = .{};
 
@@ -591,6 +592,7 @@ pub const Engine = struct {
         self.native_mode = true;
         self.preview_wanted.store(cfg.preview_self, .release);
         self.cursor_wanted.store(cfg.capture_cursor, .release);
+        syncRemoteTarget(cfg);
         self.demo_res = cfg.resolution;
         self.demo_fps = if (cfg.fps >= 45) 60 else 30;
         self.demo_source = cfg.kind;
@@ -598,6 +600,34 @@ pub const Engine = struct {
         self.demo_stop.store(false, .release);
         self.demo_thread = c.SDL_CreateThread(nativeThreadMain, "cap-4k", self);
         return self.demo_thread != null;
+    }
+
+    pub fn refreshRemoteTarget(self: *Engine, cfg: video_cfg.StreamConfig) void {
+        _ = self;
+        syncRemoteTarget(cfg);
+    }
+
+    fn syncRemoteTarget(cfg: video_cfg.StreamConfig) void {
+        var disps: [8]media_if.DisplayTarget = undefined;
+        const nd = capture_backend.enumerateDisplays(&disps);
+        if (cfg.kind == .window) {
+            remote_ctrl.mgr.setCaptureTarget(video_cfg.RemoteTarget.fromWindow(cfg.target_id), @intCast(@min(nd, 255)), 0, 0, 0);
+            return;
+        }
+        var active_idx: u8 = 0;
+        var tgt: video_cfg.RemoteTarget = .{};
+        for (disps[0..nd], 0..) |dp, i| {
+            if (dp.id == cfg.target_id or (cfg.target_id == 0 and dp.primary)) {
+                active_idx = @intCast(i);
+                tgt = video_cfg.RemoteTarget.fromMonitor(dp.hmonitor, dp.left, dp.top, dp.width, dp.height);
+                break;
+            }
+        }
+        if (tgt.kind == .virtual_desktop and nd > 0) {
+            const dp = disps[0];
+            tgt = video_cfg.RemoteTarget.fromMonitor(dp.hmonitor, dp.left, dp.top, dp.width, dp.height);
+        }
+        remote_ctrl.mgr.setCaptureTarget(tgt, @intCast(@min(nd, 255)), active_idx, 0, 0);
     }
 
     pub fn stopWatch(self: *Engine) void {
@@ -1123,6 +1153,8 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
     var enc_opt: ?capture_backend.HwEncoder = null;
     defer if (enc_opt) |*e| e.deinit();
+    var enc_w: u16 = 0;
+    var enc_h: u16 = 0;
     var pcm_buf: [1920]f32 = undefined;
     var last_preview_ms: i64 = 0;
     var last_br_check_ms: i64 = 0;
@@ -1232,6 +1264,9 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
         if (active_frame) |f| {
             last_frame_ms = t0;
+            if (remote_ctrl.mgr.activeHost()) {
+                remote_ctrl.mgr.updateTargetDims(f.width, f.height);
+            }
             if (is_fresh and preview_due and f.nv12_y.len > 0) {
                 last_preview_ms = t0;
                 engine.watch_slot.uploadNv12(
@@ -1249,9 +1284,15 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
             }
             if (tx_fn_opt) |tx_fn| {
                 const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu) .h264 else if (cfg.codec == .auto) .h264 else cfg.codec;
+                if (enc_opt != null and (enc_w != f.width or enc_h != f.height)) {
+                    enc_opt.?.deinit();
+                    enc_opt = null;
+                }
                 if (enc_opt == null) {
                     const enc_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu) .h264 else eff_codec;
                     enc_opt = capture_backend.HwEncoder.openConfigured(enc_codec, f.width, f.height, cfg.fps, cfg.bitrate_kbps, src_opt.?.d3d11Device(), cfg.hw_accel, cfg.perf_preset, cfg.keyframe_sec) catch null;
+                    enc_w = f.width;
+                    enc_h = f.height;
                     if (enc_opt) |*e| e.requestKeyframe();
                 }
                 if (enc_opt) |*e| {

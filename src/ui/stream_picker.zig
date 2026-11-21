@@ -66,19 +66,27 @@ fn refreshTargets() void {
 }
 
 var draft: Draft = .{};
-var displays: [6]media_if.DisplayTarget = undefined;
+var displays: [8]media_if.DisplayTarget = undefined;
 var display_count: usize = 0;
-var windows: [24]media_if.WindowTarget = undefined;
+var windows: [48]media_if.WindowTarget = undefined;
 var window_count: usize = 0;
 var win_scroll: usize = 0;
 var hw_caps: media_if.HwCapability = .{};
+var force_kind_once: ?u8 = null;
+
+pub fn presetKind(kind_idx: u8) void {
+    force_kind_once = kind_idx;
+}
 
 pub fn draw(ctx: *d.Ctx) void {
     if (popup.appearing) {
         const s = &ctx.st.settings;
         refreshTargets();
+        const def_kind: u8 = if (c.SDL_getenv("LARPER_DEMO") != null or (display_count == 0 and window_count == 0)) 2 else if (display_count == 0 and window_count > 0) 1 else 0;
+        const init_kind = force_kind_once orelse def_kind;
+        force_kind_once = null;
         draft = .{
-            .kind_idx = if (c.SDL_getenv("LARPER_DEMO") != null or display_count == 0) 2 else 0,
+            .kind_idx = init_kind,
             .res_idx = @min(s.video_res, 3),
             .fps_idx = @min(s.video_fps, 1),
             .codec_idx = @min(s.video_codec, 3),
@@ -100,7 +108,7 @@ pub fn draw(ctx: *d.Ctx) void {
     }
 
     const extra_disp_h: f32 = if (draft.kind_idx == 0 and display_count > 3) 36 else 0;
-    const base_h: f32 = if (draft.kind_idx == 1 and window_count > 0) 700 else 592 + extra_disp_h;
+    const base_h: f32 = if (draft.kind_idx == 1 and window_count > 0) 716 else 592 + extra_disp_h;
     const dlg_h: f32 = @min(base_h, @max(ctx.win.h - 24, 480));
     const r = forum.dialogRect(ctx, 560, dlg_h);
     const dl = popup.beginWindow("##stream-picker", r);
@@ -116,7 +124,7 @@ pub fn draw(ctx: *d.Ctx) void {
     const pad: f32 = 20;
     const w = r.w - pad * 2;
     icons.screen(dl, r.x + pad + 10, r.y + 27, ctx.col(.accent).u());
-    const ref_lbl = i18n.tr("Yenile", "Refresh");
+    const ref_lbl = i18n.tr("Atualizar", "Refresh");
     const ref_w = d.width(fam.get(.medium), 12, ref_lbl) + 20;
     const ref_r: d.Rect = .{ .x = r.right() - pad - ref_w, .y = r.y + 14, .w = ref_w, .h = 24 };
     const rh = d.hit(ctx, 0x910F, ref_r);
@@ -136,10 +144,15 @@ pub fn draw(ctx: *d.Ctx) void {
         @max(w - 38 - ref_w, 60),
     );
 
+    var scr_lb: [48]u8 = undefined;
+    var win_lb: [48]u8 = undefined;
+    const scr_lbl = std.fmt.bufPrint(&scr_lb, "{s} ({d})", .{ i18n.tr("Tela inteira", "Entire Screen"), display_count }) catch i18n.tr("Tela inteira", "Entire Screen");
+    const win_lbl = std.fmt.bufPrint(&win_lb, "{s} ({d})", .{ i18n.tr("Aplicativo / Janela", "Application / Window"), window_count }) catch i18n.tr("Aplicativo / Janela", "Application / Window");
+
     var y = r.y + 48;
     y = segRow(ctx, dl, fam, 0x9100, r.x + pad, y, w, i18n.tr("Fonte", "Source"), &.{
-        i18n.tr("Tela inteira", "Entire Screen"),
-        i18n.tr("Aplicativo / Janela", "Application / Window"),
+        scr_lbl,
+        win_lbl,
         i18n.tr("Demo 4K NV12", "4K Demo NV12"),
     }, &draft.kind_idx);
 
@@ -268,7 +281,7 @@ fn drawTargetRow(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, x: f32, y: f32,
             _ = d.textClipped(dl, fam.get(.regular), 12.5, x, y + 6, ctx.col(.muted), msg, w);
             return y + 38;
         }
-        const shown = @min(display_count, 6);
+        const shown = @min(display_count, displays.len);
         const cols: usize = @min(shown, 3);
         const rows_n = (shown + 2) / 3;
         const gap: f32 = 8;
@@ -278,8 +291,20 @@ fn drawTargetRow(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, x: f32, y: f32,
             const disp = &displays[i];
             const row = i / 3;
             const col = i % 3;
-            const star: []const u8 = if (disp.primary) "*" else "";
-            const lbl = std.fmt.bufPrint(&lb, "Mon {d}{s}: {d}x{d}", .{ i + 1, star, disp.width, disp.height }) catch "Monitor";
+            const side: []const u8 = if (disp.primary)
+                i18n.tr("Principal", "Main")
+            else if (disp.left < 0)
+                i18n.tr("Esq", "Left")
+            else if (disp.left > 0)
+                i18n.tr("Dir", "Right")
+            else if (disp.top < 0)
+                i18n.tr("Cima", "Top")
+            else
+                "Ext";
+            const lbl = if (display_count > 1)
+                std.fmt.bufPrint(&lb, "Mon {d} ({s}): {d}x{d}", .{ i + 1, side, disp.width, disp.height }) catch "Monitor"
+            else
+                std.fmt.bufPrint(&lb, "Mon {d}: {d}x{d}", .{ i + 1, disp.width, disp.height }) catch "Monitor";
             const br: d.Rect = .{
                 .x = x + @as(f32, @floatFromInt(col)) * (bw + gap),
                 .y = y + @as(f32, @floatFromInt(row)) * 34,
@@ -297,11 +322,11 @@ fn drawTargetRow(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, x: f32, y: f32,
     }
 
     if (window_count == 0) {
-        const msg = i18n.tr("Nenhuma janela capturável encontrada.", "No capturable windows found.");
-        _ = d.textClipped(dl, fam.get(.regular), 12.5, x, y + 6, ctx.col(.muted), msg, w);
+        const msg = i18n.tr("Nenhuma janela visível encontrada (janelas minimizadas não aparecem).", "No visible windows found (minimized windows stay hidden).");
+        _ = d.textClipped(dl, fam.get(.regular), 12.0, x, y + 6, ctx.col(.muted), msg, w);
         return y + 38;
     }
-    const vis_rows: usize = 5;
+    const vis_rows: usize = 6;
     const row_h: f32 = 26;
     const list_h: f32 = @floatFromInt(vis_rows);
     const box_h = list_h * row_h + 6;

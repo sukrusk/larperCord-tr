@@ -1,5 +1,18 @@
 # What changed in each version
 
+## 0.8.1
+
+**Video & Camera Settings UI**
+- Moved camera picker, live webcam test preview, camera quality (`480p`/`720p`/`1080p`/Match, `15`/`30`/`60 FPS`, Mbps), screen-share performance presets, capture backend (`Auto`/`DXGI`/`WGC`), keyframe GOP interval and remote control into a dedicated **Settings → Video & Camera** tab right below Voice.
+- Camera devices now auto-detect as soon as Video & Camera opens (with a Refresh button) so connected webcams are immediately selectable without clicking Detect first.
+- Added visible menu indicators and right-click camera/share hints on the voice bar and call controls.
+
+**AnyDesk, Cursor & Multi-Monitor**
+- Fixed invisible mouse cursor during DXGI screen sharing: `dxgi_cap.zig` now captures and composites monochrome (AND/XOR I-beam), 32-bit premultiplied color, and masked-color pointers directly onto the GPU texture (with `GetCursorInfo` frame-0 bootstrap and live `video_cursor` toggle), alongside pre-start `IGraphicsCaptureSession2` cursor setup and dynamic `Recreate` resizing in `wgc_cap.zig`.
+- Fixed window/application enumeration (`wgc_cap.zig::enumWinCb`) silently dropping browser/editor/game windows whose UTF-8 titles exceeded 96 bytes or non-ASCII bounds (`utf16ToUtf8Truncated`, `128B` title buffer, `WS_EX_TOOLWINDOW` filtering, up to 48 visible apps), and added live Monitor/App counts, left/right multi-monitor position tags, and quick **"Choose Application / Window…"** right-click shortcut in `device_menu.zig` & `stream_picker.zig`.
+- Fixed multi-monitor AnyDesk input mapping in `input_inject.zig` (`toVirtualDesktop` now resolves active `HMONITOR` via `GetMonitorInfoW` or active `HWND` via `DWMWA_EXTENDED_FRAME_BOUNDS` across 2-3 monitors including negative virtual coordinates, with atomic move+click batching and full Numpad + ISO `<>|` `0x56` Set-1 scancodes).
+- Overhauled P2P AnyDesk UX (`remote_ctrl.zig`, `stream_view.zig`): unlocked `hostLoop` mutex around `SendInput`, added real P2P RTT ping/pong telemetry (`AnyDesk 12ms`), fractional mouse-wheel accumulator, X1/X2 mouse side buttons, automatic `.release_all` on focus loss, Cloudflare/Google dual STUN fallback, and clickable **`M1`/`M2`/`M3`** monitor switcher pills in the viewer HUD.
+
 ## 0.8.0
 
 **Minimum RAM & Cleanup**

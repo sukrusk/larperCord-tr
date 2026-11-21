@@ -664,8 +664,10 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
         const on = ctx.st.cam_on;
         const bg = if (on) ctx.col(.online).mix(d.Rgba.black, 0.12 * k) else ctx.col(.elevated).mix(ctx.col(.hover), k);
         d.rect(dl, cr, bg, btn_r);
-        icons.camera(dl, cr.x + b / 2, cr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u(), !on);
-        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch.hovered);
+        const cam_ink = if (on) d.Rgba.white else ctx.col(.muted).mix(ctx.col(.text), k);
+        icons.camera(dl, cr.x + b / 2, cr.y + b / 2, cam_ink.u(), !on);
+        c.ImDrawList_AddTriangleFilled(dl, d.v(cr.right() - 8, cr.bottom() - 5), d.v(cr.right() - 3, cr.bottom() - 5), d.v(cr.right() - 5.5, cr.bottom() - 2), cam_ink.alpha(0.75).u());
+        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera · botão direito: escolher câmera", "Turn camera off · right-click: pick camera") else i18n.tr("Ligar câmera · botão direito: escolher câmera", "Turn camera on · right-click: pick camera"), ch.hovered);
         if (ch.clicked) ctx.act(.toggle_camera);
         if (ch.right) devices.open(ctx, .cam, cr);
         x += b + gap;
@@ -680,7 +682,7 @@ fn buttons(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, r: d.Rect, tty: bool,
         const bg = if (on) ctx.col(.accent).mix(d.Rgba.black, 0.12 * k) else ctx.col(.elevated).mix(ctx.col(.hover), k);
         d.rect(dl, sr, bg, btn_r);
         icons.screen(dl, sr.x + b / 2, sr.y + b / 2, if (on) d.Rgba.white.u() else ctx.col(.muted).mix(ctx.col(.text), k).u());
-        d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), sh.hovered);
+        d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento · botão direito: opções", "Stop sharing · right-click: options") else i18n.tr("Compartilhar tela / Go Live · botão direito: opções", "Share screen / Go Live · right-click: options"), sh.hovered);
         if (sh.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
         if (sh.right) devices.open(ctx, .share, sr);
         x += b + gap;

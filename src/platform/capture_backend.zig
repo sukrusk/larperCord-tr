@@ -68,7 +68,7 @@ pub const ScreenSource = union(enum) {
             return;
         }
         switch (self.*) {
-            .dxgi => {},
+            .dxgi => |*d| d.setCursorCapture(enabled),
             .wgc => |*w| w.setCursorCapture(enabled),
         }
     }
@@ -94,7 +94,7 @@ pub fn runSelfProbe() void {
     const nd = enumerateDisplays(&displays);
     std.debug.print("hw-probe: displays={d}\n", .{nd});
     for (displays[0..nd], 0..) |dp, i| {
-        std.debug.print("  display[{d}]: id={d} {d}x{d} primary={any} name={s}\n", .{ i, dp.id, dp.width, dp.height, dp.primary, dp.nameSlice() });
+        std.debug.print("  display[{d}]: id={d} pos=({d},{d}) {d}x{d} primary={any} name={s}\n", .{ i, dp.id, dp.left, dp.top, dp.width, dp.height, dp.primary, dp.nameSlice() });
     }
 
     var wins: [8]media_if.WindowTarget = undefined;

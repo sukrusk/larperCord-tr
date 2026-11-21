@@ -244,6 +244,36 @@ pub fn mapViewportToNormalized(
 // Protocolo compacto (16 bytes) para controle remoto estilo AnyDesk
 // ---------------------------------------------------------------------------
 
+pub const RemoteTargetKind = enum(u8) {
+    virtual_desktop = 0,
+    monitor = 1,
+    window = 2,
+};
+
+pub const RemoteTarget = struct {
+    kind: RemoteTargetKind = .virtual_desktop,
+    handle: u64 = 0,
+    left: i32 = 0,
+    top: i32 = 0,
+    right: i32 = 0,
+    bottom: i32 = 0,
+
+    pub fn fromMonitor(hmonitor: u64, left: i32, top: i32, w: u32, h: u32) RemoteTarget {
+        return .{
+            .kind = .monitor,
+            .handle = hmonitor,
+            .left = left,
+            .top = top,
+            .right = left + @as(i32, @intCast(w)),
+            .bottom = top + @as(i32, @intCast(h)),
+        };
+    }
+
+    pub fn fromWindow(hwnd: u64) RemoteTarget {
+        return .{ .kind = .window, .handle = hwnd };
+    }
+};
+
 pub const RemoteInputKind = enum(u8) {
     mouse_move = 1,
     mouse_btn = 2,
@@ -252,6 +282,7 @@ pub const RemoteInputKind = enum(u8) {
     release_all = 5,
     ping = 6,
     pong = 7,
+    switch_display = 8,
 };
 
 pub const RemoteInputPacket = struct {

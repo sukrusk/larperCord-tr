@@ -15,6 +15,10 @@ const win_inject = if (is_win) @import("../platform/win/input_inject.zig") else 
         pub fn init(_: u64) !Injector {
             return error.NotImplementedOnLinuxYet;
         }
+        pub fn initTarget(_: video_cfg.RemoteTarget) !Injector {
+            return error.NotImplementedOnLinuxYet;
+        }
+        pub fn setTarget(_: *Injector, _: video_cfg.RemoteTarget) void {}
         pub fn apply(_: *Injector, _: video_cfg.RemoteInputPacket, _: video_cfg.RemotePerm) void {}
         pub fn releaseAll(_: *Injector) void {}
         pub fn deinit(_: *Injector) void {}
@@ -100,17 +104,57 @@ pub fn prepareTicket(stun_ip: [*:0]const u8, stun_port: u16, timeout_ms: c_int) 
     return ticket;
 }
 
-/// Descobre IP público via STUN (Google/fallback) + IP LAN local para NAT P2P AnyDesk.
+/// Descobre IP público via STUN (Google/Cloudflare fallback) + IP LAN local para NAT P2P AnyDesk.
 pub fn prepareAutoTicket(timeout_ms: c_int) ?LocalTicket {
+    const stun_hosts = [_][2]struct { host: [*:0]const u8, port: u16 }{
+        .{ .{ .host = "stun.l.google.com", .port = 19302 }, .{ .host = "142.250.82.127", .port = 19302 } },
+        .{ .{ .host = "stun.cloudflare.com", .port = 3478 }, .{ .host = "162.159.207.0", .port = 3478 } },
+    };
+    const t0 = prepareAutoFromHost(stun_hosts[0][0].host, stun_hosts[0][0].port, @divTrunc(timeout_ms, 2));
+    if (t0) |tk| {
+        if (!std.mem.eql(u8, &tk.pub_ip4, &tk.lan_ip4) or tk.pub_port != tk.local_port) return tk;
+        // Se STUN Google não respondeu, tenta Cloudflare reutilizando o mesmo socket/porta se quiser; ou mantém fallback rápido.
+        if (probeStunIntoTicket(tk.sock, stun_hosts[1][0].host, stun_hosts[1][0].port, @divTrunc(timeout_ms, 2))) |ep| {
+            var mut = tk;
+            mut.pub_ip4 = ep.ip4;
+            mut.pub_port = ep.port;
+            return mut;
+        }
+        return tk;
+    }
+    return prepareTicket(stun_hosts[0][1].host, stun_hosts[0][1].port, timeout_ms);
+}
+
+fn prepareAutoFromHost(host: [*:0]const u8, port: u16, timeout_ms: c_int) ?LocalTicket {
     var ip_z: [24]u8 = @splat(0);
-    if (sys.resolveHostIp4("stun.l.google.com")) |ip4| {
+    if (sys.resolveHostIp4(host)) |ip4| {
         if (std.fmt.bufPrint(&ip_z, "{d}.{d}.{d}.{d}", .{ ip4[0], ip4[1], ip4[2], ip4[3] })) |s| {
             ip_z[s.len] = 0;
             const z: [:0]const u8 = ip_z[0..s.len :0];
-            return prepareTicket(z.ptr, 19302, timeout_ms);
+            return prepareTicket(z.ptr, port, timeout_ms);
         } else |_| {}
     }
-    return prepareTicket("142.250.82.127", 19302, timeout_ms);
+    return null;
+}
+
+fn probeStunIntoTicket(sock: sys.Socket, host: [*:0]const u8, port: u16, timeout_ms: c_int) ?proto.StunAddr {
+    if (timeout_ms <= 0) return null;
+    const ip4 = sys.resolveHostIp4(host) orelse return null;
+    const stun_addr = ipv4FromBytes(ip4, port) orelse return null;
+    var txn: [12]u8 = undefined;
+    randomBytes(&txn);
+    var req: [20]u8 = undefined;
+    proto.buildStunBindingRequest(&req, txn);
+    _ = sys.sendTo(sock, &req, &stun_addr);
+
+    var pfd = [1]sys.PollFd{.{ .fd = sock, .events = c.POLLIN, .revents = 0 }};
+    sys.poll(&pfd, 1, timeout_ms);
+    if ((pfd[0].revents & c.POLLIN) != 0) {
+        var resp: [256]u8 = undefined;
+        const n = sys.recvNow(sock, &resp);
+        if (n > 0) return proto.parseStunBindingResponse(resp[0..@intCast(n)], txn);
+    }
+    return null;
 }
 
 pub fn ipv4FromBytes(ip: [4]u8, port: u16) ?sys.SockAddrIn {
@@ -136,6 +180,15 @@ pub const Manager = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     thread: ?*c.SDL_Thread = null,
     target_hwnd: u64 = 0,
+    cap_target: video_cfg.RemoteTarget = .{},
+    target_dirty: std.atomic.Value(bool) = .init(false),
+    host_meta: proto.HostInfo = .{},
+    host_meta_dirty: std.atomic.Value(bool) = .init(false),
+    pending_switch_disp: std.atomic.Value(i32) = .init(-1),
+    rtt_ms: std.atomic.Value(u16) = .init(0),
+    viewer_displays: std.atomic.Value(u8) = .init(0),
+    viewer_active_disp: std.atomic.Value(u8) = .init(0),
+    viewer_target_kind: std.atomic.Value(u8) = .init(0),
     is_host: bool = false,
     video_seq: u16 = 0,
     packets_rx: std.atomic.Value(u64) = .init(0),
@@ -181,11 +234,61 @@ pub const Manager = struct {
         return self.pli_pending.swap(false, .acq_rel);
     }
 
+    pub fn consumeSwitchDisplay(self: *Manager) ?u16 {
+        const v = self.pending_switch_disp.swap(-1, .acq_rel);
+        return if (v >= 0) @intCast(v) else null;
+    }
+
+    pub fn peerConnected(self: *const Manager) bool {
+        return self.peer_locked.load(.acquire);
+    }
+
+    pub fn setCaptureTarget(self: *Manager, target: video_cfg.RemoteTarget, disp_count: u8, active_disp: u8, w: u16, h: u16) void {
+        self.ensureMu();
+        _ = c.SDL_LockMutex(self.mu.?);
+        self.cap_target = target;
+        self.host_meta.display_count = disp_count;
+        self.host_meta.active_display = active_disp;
+        self.host_meta.target_kind = target.kind;
+        self.host_meta.width = w;
+        self.host_meta.height = h;
+        if (self.session) |s| self.host_meta.perm = s.perm;
+        _ = c.SDL_UnlockMutex(self.mu.?);
+        self.target_dirty.store(true, .release);
+        self.host_meta_dirty.store(true, .release);
+    }
+
+    pub fn updateTargetDims(self: *Manager, w: u16, h: u16) void {
+        const m = self.mu orelse return;
+        _ = c.SDL_LockMutex(m);
+        const changed = self.host_meta.width != w or self.host_meta.height != h;
+        if (changed) {
+            self.host_meta.width = w;
+            self.host_meta.height = h;
+        }
+        _ = c.SDL_UnlockMutex(m);
+        if (changed) self.host_meta_dirty.store(true, .release);
+    }
+
+    fn getCaptureTarget(self: *Manager) video_cfg.RemoteTarget {
+        if (self.mu == null) return self.cap_target;
+        _ = c.SDL_LockMutex(self.mu.?);
+        defer _ = c.SDL_UnlockMutex(self.mu.?);
+        return self.cap_target;
+    }
+
     pub fn setAltEndpoint(self: *Manager, ip4: [4]u8, port: u16) void {
         if (self.mu == null) return;
         _ = c.SDL_LockMutex(self.mu.?);
-        defer _ = c.SDL_UnlockMutex(self.mu.?);
         self.alt_addr = ipv4FromBytes(ip4, port);
+        _ = c.SDL_UnlockMutex(self.mu.?);
+        self.sendSealedPingNow();
+    }
+
+    fn sendSealedPingNow(self: *Manager) void {
+        var ts: [8]u8 = undefined;
+        std.mem.writeInt(u64, &ts, @intCast(c.SDL_GetTicks()), .little);
+        self.sendSealedType(.ping, &ts);
     }
 
     pub fn startHost(
@@ -219,7 +322,11 @@ pub const Manager = struct {
         self.stopping.store(false, .release);
         self.packets_rx.store(0, .release);
         self.packets_tx.store(0, .release);
-        self.sendSealedType(.ping, &.{});
+        self.rtt_ms.store(0, .release);
+        self.pending_switch_disp.store(-1, .release);
+        self.target_dirty.store(true, .release);
+        self.host_meta_dirty.store(true, .release);
+        self.sendSealedPingNow();
         self.thread = c.SDL_CreateThread(hostLoop, "rc-host", self) orelse {
             self.stopLocked();
             return error.ThreadFailed;
@@ -255,8 +362,12 @@ pub const Manager = struct {
         self.stopping.store(false, .release);
         self.packets_rx.store(0, .release);
         self.packets_tx.store(0, .release);
+        self.rtt_ms.store(0, .release);
+        self.viewer_displays.store(0, .release);
+        self.viewer_active_disp.store(0, .release);
+        self.viewer_target_kind.store(0, .release);
         // Envia ping inicial para abrir NAT hole-punch e confirmar túnel criptografado.
-        self.sendControl(.{ .kind = .ping });
+        self.sendSealedPingNow();
         self.thread = c.SDL_CreateThread(viewerLoop, "rc-view", self) orelse {
             self.stopLocked();
             return error.ThreadFailed;
@@ -301,8 +412,10 @@ pub const Manager = struct {
     pub fn setPermission(self: *Manager, perm: video_cfg.RemotePerm) void {
         const m = self.mu orelse return;
         _ = c.SDL_LockMutex(m);
-        defer _ = c.SDL_UnlockMutex(m);
         if (self.session) |*s| s.perm = perm;
+        self.host_meta.perm = perm;
+        _ = c.SDL_UnlockMutex(m);
+        self.host_meta_dirty.store(true, .release);
     }
 
     pub fn setRemoteVideoSink(
@@ -395,22 +508,36 @@ pub const Manager = struct {
 
 fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
     const self: *Manager = @ptrCast(@alignCast(data.?));
-    var inj: ?win_inject.Injector = win_inject.Injector.init(self.target_hwnd) catch null;
+    const init_target = if (self.target_hwnd != 0)
+        video_cfg.RemoteTarget.fromWindow(self.target_hwnd)
+    else
+        self.getCaptureTarget();
+    var inj: ?win_inject.Injector = win_inject.Injector.initTarget(init_target) catch null;
     defer if (inj) |*i| i.deinit();
 
     var wire: [2048]u8 = undefined;
     var plain: [2048]u8 = undefined;
     var last_probe_ms: u64 = 0;
+    var last_meta_ms: u64 = 0;
     while (!self.stopping.load(.acquire)) {
+        if (self.target_dirty.swap(false, .acq_rel)) {
+            const nt = if (self.target_hwnd != 0) video_cfg.RemoteTarget.fromWindow(self.target_hwnd) else self.getCaptureTarget();
+            if (inj) |*i| i.setTarget(nt);
+        }
+
+        const now_ms = c.SDL_GetTicks();
         if (!self.peer_locked.load(.acquire)) {
-            const now_ms = c.SDL_GetTicks();
             if (now_ms - last_probe_ms >= 150) {
                 last_probe_ms = now_ms;
-                self.sendSealedType(.ping, &.{});
+                self.sendSealedPingNow();
             }
+        } else if (self.host_meta_dirty.swap(false, .acq_rel) or now_ms - last_meta_ms >= 1200) {
+            last_meta_ms = now_ms;
+            sendHostMetaLocked(self);
         }
+
         var pfd = [1]sys.PollFd{.{ .fd = self.sock, .events = c.POLLIN, .revents = 0 }};
-        sys.poll(&pfd, 1, 25);
+        sys.poll(&pfd, 1, 20);
         if ((pfd[0].revents & c.POLLIN) == 0) continue;
 
         var from: sys.SockAddrIn = undefined;
@@ -426,12 +553,14 @@ fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
             _ = c.SDL_UnlockMutex(self.mu.?);
             continue;
         };
+        const was_locked = self.peer_locked.swap(true, .release);
         self.peer_addr = from;
-        self.peer_locked.store(true, .release);
         const perm = sess.perm;
-        const allow_fn = sess;
+        const allow_fn = sess.*;
         var pong_wire: [64]u8 = undefined;
         var pong_len: usize = 0;
+        var act_pkt: ?video_cfg.RemoteInputPacket = null;
+        var do_release_all = false;
 
         switch (opened.msg_type) {
             .input => {
@@ -439,24 +568,56 @@ fn hostLoop(data: ?*anyopaque) callconv(.c) c_int {
                     if (pkt.kind == .ping) {
                         var pong_raw: [video_cfg.RemoteInputPacket.wire_len]u8 = undefined;
                         (@as(video_cfg.RemoteInputPacket, .{ .kind = .pong, .seq = pkt.seq })).encode(&pong_raw);
-                        if (allow_fn.seal(.pong, &pong_raw, &pong_wire)) |sw| pong_len = sw.len else |_| {}
+                        if (sess.seal(.pong, &pong_raw, &pong_wire)) |sw| pong_len = sw.len else |_| {}
+                    } else if (pkt.kind == .switch_display) {
+                        if (allow_fn.allowInput(pkt)) {
+                            self.pending_switch_disp.store(@intCast(pkt.code), .release);
+                        }
                     } else if (allow_fn.allowInput(pkt)) {
-                        if (inj) |*i| i.apply(pkt, perm);
+                        act_pkt = pkt;
                     }
                     _ = self.packets_rx.fetchAdd(1, .monotonic);
                 }
             },
-            .release_all => if (inj) |*i| i.releaseAll(),
+            .release_all => do_release_all = true,
             .video_pli => self.pli_pending.store(true, .release),
             .ping => {
-                if (allow_fn.seal(.pong, opened.payload, &pong_wire)) |sw| pong_len = sw.len else |_| {}
+                if (sess.seal(.pong, opened.payload, &pong_wire)) |sw| pong_len = sw.len else |_| {}
+                _ = self.packets_rx.fetchAdd(1, .monotonic);
+            },
+            .pong => {
+                if (opened.payload.len >= 8) {
+                    const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
+                    const now64: u64 = @intCast(c.SDL_GetTicks());
+                    if (now64 >= tx_ms) self.rtt_ms.store(@intCast(@min(now64 - tx_ms, 9999)), .release);
+                }
+                _ = self.packets_rx.fetchAdd(1, .monotonic);
             },
             else => {},
         }
+        const reply_peer = self.peer_addr;
         _ = c.SDL_UnlockMutex(self.mu.?);
-        if (pong_len > 0) _ = sys.sendTo(self.sock, pong_wire[0..pong_len], &self.peer_addr);
+
+        // Executa SendInput fora do mutex para nunca bloquear sendVideoAu (60fps) no host.
+        if (do_release_all) {
+            if (inj) |*i| i.releaseAll();
+        } else if (act_pkt) |pkt| {
+            if (inj) |*i| i.apply(pkt, perm);
+        }
+        if (pong_len > 0) _ = sys.sendTo(self.sock, pong_wire[0..pong_len], &reply_peer);
+        if (!was_locked) self.host_meta_dirty.store(true, .release);
     }
     return 0;
+}
+
+fn sendHostMetaLocked(self: *Manager) void {
+    const m = self.mu orelse return;
+    _ = c.SDL_LockMutex(m);
+    const meta = self.host_meta;
+    _ = c.SDL_UnlockMutex(m);
+    var raw: [proto.HostInfo.wire_len]u8 = undefined;
+    meta.encode(&raw);
+    self.sendSealedType(.host_info, &raw);
 }
 
 fn viewerLoop(data: ?*anyopaque) callconv(.c) c_int {
@@ -472,15 +633,14 @@ fn viewerLoop(data: ?*anyopaque) callconv(.c) c_int {
     var got_keyframe = false;
 
     while (!self.stopping.load(.acquire)) {
-        if (!self.peer_locked.load(.acquire)) {
-            const now_ms = c.SDL_GetTicks();
-            if (now_ms - last_probe_ms >= 150) {
-                last_probe_ms = now_ms;
-                self.sendSealedType(.ping, &.{});
-            }
+        const now_ms = c.SDL_GetTicks();
+        const probe_interval: u64 = if (self.peer_locked.load(.acquire)) 1000 else 150;
+        if (now_ms - last_probe_ms >= probe_interval) {
+            last_probe_ms = now_ms;
+            self.sendSealedPingNow();
         }
         var pfd = [1]sys.PollFd{.{ .fd = self.sock, .events = c.POLLIN, .revents = 0 }};
-        sys.poll(&pfd, 1, 25);
+        sys.poll(&pfd, 1, 20);
         if ((pfd[0].revents & c.POLLIN) == 0) continue;
 
         var from: sys.SockAddrIn = undefined;
@@ -505,48 +665,75 @@ fn viewerLoop(data: ?*anyopaque) callconv(.c) c_int {
         _ = c.SDL_UnlockMutex(self.mu.?);
 
         _ = self.packets_rx.fetchAdd(1, .monotonic);
-        if (opened.msg_type == .video_chunk) {
-            if (fcb != null and opened.payload.len > 7) {
-                const rtp_ts = std.mem.readInt(u32, opened.payload[0..4], .big);
-                const seq = std.mem.readInt(u16, opened.payload[4..6], .big);
-                const marker = (opened.payload[6] & 1) != 0;
-                const rtp_pay = opened.payload[7..];
-                switch (assembler.pushH264(seq, rtp_ts, marker, rtp_pay)) {
-                    .dropped => |dr| {
-                        const now_ms = c.SDL_GetTicks();
-                        if (dr.need_pli and now_ms - last_pli_ms >= 800) {
-                            last_pli_ms = now_ms;
-                            self.sendSealedType(.video_pli, &.{});
-                        }
-                    },
-                    .frame => |au| {
-                        if (!got_keyframe) {
-                            if (hasH264Keyframe(au)) {
-                                got_keyframe = true;
-                            } else {
-                                const now_ms = c.SDL_GetTicks();
-                                if (now_ms - last_pli_ms >= 800) {
-                                    last_pli_ms = now_ms;
-                                    self.sendSealedType(.video_pli, &.{});
-                                }
-                                continue;
-                            }
-                        }
-                        if (dec_opt == null) {
-                            dec_opt = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch null;
-                        }
-                        if (dec_opt) |*dc| {
-                            const pts_us: i64 = @divTrunc(@as(i64, rtp_ts) * 1000, 90);
-                            if (dc.decode(au, pts_us) catch null) |df| {
-                                fcb.?(fctx, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, @intCast(c.SDL_GetTicks()));
-                            }
-                        }
-                    },
-                    else => {},
+        switch (opened.msg_type) {
+            .ping => {
+                var pong_buf: [64]u8 = undefined;
+                if (self.mu) |m| {
+                    _ = c.SDL_LockMutex(m);
+                    const plen: usize = if (self.session) |*s| (if (s.seal(.pong, opened.payload, &pong_buf)) |sw| sw.len else |_| 0) else 0;
+                    const peer = self.peer_addr;
+                    _ = c.SDL_UnlockMutex(m);
+                    if (plen > 0) _ = sys.sendTo(self.sock, pong_buf[0..plen], &peer);
                 }
-            } else if (cb) |f| {
-                f(cb_ctx, opened.payload);
-            }
+            },
+            .pong => {
+                if (opened.payload.len >= 8) {
+                    const tx_ms = std.mem.readInt(u64, opened.payload[0..8], .little);
+                    const cur_ms: u64 = @intCast(c.SDL_GetTicks());
+                    if (cur_ms >= tx_ms) self.rtt_ms.store(@intCast(@min(cur_ms - tx_ms, 9999)), .release);
+                }
+            },
+            .host_info => {
+                if (proto.HostInfo.decode(opened.payload)) |hi| {
+                    self.viewer_displays.store(hi.display_count, .release);
+                    self.viewer_active_disp.store(hi.active_display, .release);
+                    self.viewer_target_kind.store(@intFromEnum(hi.target_kind), .release);
+                }
+            },
+            .video_chunk => {
+                if (fcb != null and opened.payload.len > 7) {
+                    const rtp_ts = std.mem.readInt(u32, opened.payload[0..4], .big);
+                    const seq = std.mem.readInt(u16, opened.payload[4..6], .big);
+                    const marker = (opened.payload[6] & 1) != 0;
+                    const rtp_pay = opened.payload[7..];
+                    switch (assembler.pushH264(seq, rtp_ts, marker, rtp_pay)) {
+                        .dropped => |dr| {
+                            const tnow = c.SDL_GetTicks();
+                            if (dr.need_pli and tnow - last_pli_ms >= 800) {
+                                last_pli_ms = tnow;
+                                self.sendSealedType(.video_pli, &.{});
+                            }
+                        },
+                        .frame => |au| {
+                            if (!got_keyframe) {
+                                if (hasH264Keyframe(au)) {
+                                    got_keyframe = true;
+                                } else {
+                                    const tnow = c.SDL_GetTicks();
+                                    if (tnow - last_pli_ms >= 800) {
+                                        last_pli_ms = tnow;
+                                        self.sendSealedType(.video_pli, &.{});
+                                    }
+                                    continue;
+                                }
+                            }
+                            if (dec_opt == null) {
+                                dec_opt = capture_backend.HwDecoder.open(.h264, 1920, 1080, null) catch null;
+                            }
+                            if (dec_opt) |*dc| {
+                                const pts_us: i64 = @divTrunc(@as(i64, rtp_ts) * 1000, 90);
+                                if (dc.decode(au, pts_us) catch null) |df| {
+                                    fcb.?(fctx, df.width, df.height, df.nv12_y, df.y_pitch, df.nv12_uv, df.uv_pitch, .h264, @intCast(c.SDL_GetTicks()));
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                } else if (cb) |f| {
+                    f(cb_ctx, opened.payload);
+                }
+            },
+            else => {},
         }
     }
     return 0;

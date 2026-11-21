@@ -198,8 +198,8 @@ fn drawCamMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     }
     yy += row_h;
 
-    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x522, i18n.tr("Ses ve Video Ayarları", "Voice & Video Settings"), false, false)) {
-        s.page = .voz;
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x522, i18n.tr("Vídeo e Câmera", "Video & Camera"), false, false)) {
+        s.page = .video;
         ctx.act(.open_settings);
         popup.close(ctx);
     }
@@ -207,7 +207,7 @@ fn drawCamMenu(ctx: *d.Ctx, x: f32, y: f32) void {
 
 fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     const s = &ctx.st.settings;
-    const n_extra: f32 = if (ctx.st.stream_on) 4 else 2;
+    const n_extra: f32 = if (ctx.st.stream_on) 5 else 3;
     const h = pad * 2 + head_h + n_extra * row_h + sep_h + link_h;
     const r = popup.fit(ctx, x, y - h - 6, menu_w, h);
     const dl = popup.beginWindow("##devices", r);
@@ -223,8 +223,17 @@ fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     d.text(dl, ctx.ui.get(.semibold), 11.5, r.x + 16, yy + 8, ctx.col(.muted), i18n.tr("EKRAN PAYLAŞIMI", "SCREEN SHARE"));
     yy += head_h;
 
-    const pick_lbl = if (ctx.st.stream_on) i18n.tr("Kaynak / Kalite Değiştir", "Switch source / quality") else i18n.tr("Ekran / Uygulama Seç…", "Choose screen / app…");
-    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x540, pick_lbl, false, false)) {
+    const scr_lbl = if (ctx.st.stream_on) i18n.tr("Mudar Monitor / Tela…", "Switch Monitor / Screen…") else i18n.tr("Escolher Monitor / Tela…", "Choose Monitor / Screen…");
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x540, scr_lbl, false, false)) {
+        @import("stream_picker.zig").presetKind(0);
+        ctx.act(.open_stream_picker);
+        return;
+    }
+    yy += row_h;
+
+    const app_lbl = i18n.tr("Escolher Aplicativo / Janela…", "Choose Application / Window…");
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x545, app_lbl, false, false)) {
+        @import("stream_picker.zig").presetKind(1);
         ctx.act(.open_stream_picker);
         return;
     }
@@ -266,8 +275,8 @@ fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     d.line(dl, r.x + 10, yy + 4, r.right() - 10, yy + 4, ctx.col(.border), 1);
     yy += sep_h;
 
-    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x544, i18n.tr("Ses ve Video Ayarları", "Voice & Video Settings"), false, false)) {
-        s.page = .voz;
+    if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = link_h - 2 }, base_id + 0x544, i18n.tr("Vídeo e Câmera", "Video & Camera"), false, false)) {
+        s.page = .video;
         ctx.act(.open_settings);
         popup.close(ctx);
     }

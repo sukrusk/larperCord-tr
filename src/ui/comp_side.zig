@@ -438,7 +438,7 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 const on = ctx.st.cam_on;
                 if (hb.clicked) ctx.act(.toggle_camera);
                 if (hb.right) @import("device_menu.zig").open(ctx, .cam, sr);
-                d.tip(ctx, sr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), hb.hovered);
+                d.tip(ctx, sr, if (on) i18n.tr("Desligar câmera · botão direito: escolher câmera", "Turn camera off · right-click: pick camera") else i18n.tr("Ligar câmera · botão direito: escolher câmera", "Turn camera on · right-click: pick camera"), hb.hovered);
                 if (tty) {
                     if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);
                 } else {
@@ -454,7 +454,7 @@ pub fn statusBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
                 const on = ctx.st.stream_on;
                 if (hb.clicked) ctx.act(if (on) .stop_screen_share else .open_stream_picker);
                 if (hb.right) @import("device_menu.zig").open(ctx, .share, sr);
-                d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento", "Stop screen share") else i18n.tr("Compartilhar tela (4K)", "Share screen (4K)"), hb.hovered);
+                d.tip(ctx, sr, if (on) i18n.tr("Parar compartilhamento · botão direito: opções", "Stop sharing · right-click: options") else i18n.tr("Compartilhar tela / Go Live · botão direito: opções", "Share screen / Go Live · right-click: options"), hb.hovered);
                 if (tty) {
                     if (hb.hovered) d.rect(dl, sr, ctx.col(.hover), 0);
                 } else {

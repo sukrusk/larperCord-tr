@@ -18,8 +18,41 @@ pub const MsgType = enum(u8) {
     ping = 3,
     pong = 4,
     release_all = 5,
+    host_info = 6,
     video_chunk = 0x10,
     video_pli = 0x11,
+};
+
+pub const HostInfo = struct {
+    display_count: u8 = 1,
+    active_display: u8 = 0,
+    perm: video_cfg.RemotePerm = .off,
+    target_kind: video_cfg.RemoteTargetKind = .virtual_desktop,
+    width: u16 = 0,
+    height: u16 = 0,
+
+    pub const wire_len = 8;
+
+    pub fn encode(self: HostInfo, out: *[wire_len]u8) void {
+        out[0] = self.display_count;
+        out[1] = self.active_display;
+        out[2] = @intFromEnum(self.perm);
+        out[3] = @intFromEnum(self.target_kind);
+        std.mem.writeInt(u16, out[4..6], self.width, .little);
+        std.mem.writeInt(u16, out[6..8], self.height, .little);
+    }
+
+    pub fn decode(raw: []const u8) ?HostInfo {
+        if (raw.len < wire_len) return null;
+        return .{
+            .display_count = raw[0],
+            .active_display = raw[1],
+            .perm = std.enums.fromInt(video_cfg.RemotePerm, raw[2]) orelse .off,
+            .target_kind = std.enums.fromInt(video_cfg.RemoteTargetKind, raw[3]) orelse .virtual_desktop,
+            .width = std.mem.readInt(u16, raw[4..6], .little),
+            .height = std.mem.readInt(u16, raw[6..8], .little),
+        };
+    }
 };
 
 pub const Role = enum(u8) {
@@ -127,7 +160,7 @@ pub const Session = struct {
     pub fn allowInput(self: *const Session, pkt: video_cfg.RemoteInputPacket) bool {
         if (self.perm == .off) return false;
         return switch (pkt.kind) {
-            .mouse_move, .mouse_btn, .mouse_wheel, .release_all, .ping, .pong => true,
+            .mouse_move, .mouse_btn, .mouse_wheel, .release_all, .ping, .pong, .switch_display => true,
             .key => self.perm == .full,
         };
     }
@@ -249,4 +282,33 @@ test "STUN Binding Request e XOR-MAPPED-ADDRESS IPv4" {
     const parsed = parseStunBindingResponse(&resp, txn).?;
     try t.expectEqual(@as(u16, 51820), parsed.port);
     try t.expectEqualSlices(u8, &.{ 203, 0, 113, 45 }, &parsed.ip4);
+}
+
+test "HostInfo encode/decode and switch_display permission check" {
+    const hi: HostInfo = .{
+        .display_count = 3,
+        .active_display = 1,
+        .perm = .full,
+        .target_kind = .monitor,
+        .width = 2560,
+        .height = 1440,
+    };
+    var buf: [HostInfo.wire_len]u8 = undefined;
+    hi.encode(&buf);
+    const dec = HostInfo.decode(&buf).?;
+    try t.expectEqual(@as(u8, 3), dec.display_count);
+    try t.expectEqual(@as(u8, 1), dec.active_display);
+    try t.expectEqual(video_cfg.RemotePerm.full, dec.perm);
+    try t.expectEqual(video_cfg.RemoteTargetKind.monitor, dec.target_kind);
+    try t.expectEqual(@as(u16, 2560), dec.width);
+    try t.expectEqual(@as(u16, 1440), dec.height);
+
+    const h_kp = Session.makeKeyPair(@splat(3));
+    const v_kp = Session.makeKeyPair(@splat(4));
+    var sess = try Session.derive(.host, h_kp.secret_key, v_kp.public_key, 123456);
+    defer sess.wipe();
+    sess.perm = .mouse_only;
+    try t.expect(sess.allowInput(.{ .kind = .switch_display, .code = 2 }));
+    sess.perm = .off;
+    try t.expect(!sess.allowInput(.{ .kind = .switch_display, .code = 2 }));
 }

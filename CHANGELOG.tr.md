@@ -1,5 +1,18 @@
 # Sürüm Notları
 
+## 0.8.1
+
+**Video ve Kamera Sekmesi**
+- Kamera seçimi, canlı ön izleme, kameraya özel çözünürlük/FPS/bit hızı ayarları, ekran paylaşımı performans profilleri, yakalama motoru (`Auto`/`DXGI`/`WGC`), keyframe aralığı ve uzaktan kontrol artık doğrudan **Ayarlar → Video ve Kamera** sekmesinde (Ses'in hemen altında) yer alıyor.
+- Video ve Kamera sekmesi açıldığında bağlı web kameraları otomatik algılanıp doğrudan listelenir; önceki "önce algıla düğmesine bas" adımı kaldırıldı.
+- Ses çubuğu ve çağrı kontrollerindeki kamera/paylaşım düğmelerine sağ tık kamera/seçenek menüsü ipucu ve köşe ok göstergesi eklendi.
+
+**AnyDesk, İmleç ve Çoklu Ekran**
+- DXGI ekran paylaşımında görünmeyen fare imleci düzeltildi: `dxgi_cap.zig` artık tek renkli (AND/XOR metin imleci dahil), 32-bit renkli ve maskeli donanım imleçlerini doğrudan GPU dokusuna işler (`GetCursorInfo` 0. kare desteği ve canlı aç/kapat ile); `wgc_cap.zig` ise başlatmadan önce imleç bayrağını ayarlar ve pencere boyutu/DPI değişiminde havuzu dinamik olarak yeniler (`Recreate`).
+- Başlığı 96 baytı geçen veya Türkçe/UTF-8 karakter içeren tarayıcı/uygulama pencerelerini sessizce düşüren `wgc_cap.zig::enumWinCb` hatası giderildi (`utf16ToUtf8Truncated`, `WS_EX_TOOLWINDOW` filtresi, 48 pencereye kadar liste); yayın seçiciye canlı monitör/uygulama sayısı, çoklu ekranda Sol/Sağ/Ana konum etiketleri ve sağ tık menüsüne doğrudan **"Uygulama / Pencere Seç…"** kısayolu eklendi.
+- 2 ve 3 monitörde yaşanan AnyDesk koordinat hataları düzeltildi: `input_inject.zig` yakalanan monitör (`GetMonitorInfoW`) veya uygulama penceresi (`DWMWA_EXTENDED_FRAME_BOUNDS`) alanını negatif sanal masaüstü koordinatları dahil birebir eşler; Numpad ve ISO `<>|` (`0x56`) tuşları ile atomik tıklama desteği eklendi.
+- AnyDesk P2P altyapısı güçlendirildi: video kodlamasını bloklamamak için `SendInput` mutex dışına alındı, canlı P2P gecikme ölçümü (`AnyDesk 12ms`), kesirli tekerlek biriktirici, yan fare düğmeleri (`X1`/`X2`), odak kaybında otomatik tuş bırakma, Google/Cloudflare çift STUN yedeği ve izleyicide canlı **`M1`/`M2`/`M3`** monitör değiştirme düğmeleri eklendi.
+
 ## 0.8.0
 
 **Minimum RAM ve Bellek Optimizasyonu**

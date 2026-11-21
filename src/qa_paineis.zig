@@ -1274,7 +1274,7 @@ pub const ops_pages = [_]Op{
     .{ .shot = "73c-atualizacoes-pequena" },
     .{ .resize = .{ 1280, 800 } },
     .{ .wait = 200 },
-} ++ pageOps("Minha conta", "conta") ++ pageOps("Privacidade", "privacidade") ++ pageOps("Alertas e filtros", "filtros") ++ pageOps("Aparência", "aparencia") ++ ops_fontes ++ pageOps("Acessibilidade", "acessibilidade") ++ pageOps("Chat", "chat") ++ pageOps("Voz", "voz") ++ pageOps("Notificações", "notificacoes") ++ pageOps("Atalhos de teclado", "atalhos") ++ pageOps("Idioma", "idioma") ++ pageOps("Rede", "rede") ++ pageOps("Avançado", "avancado") ++ pageOps("Desempenho", "desempenho") ++ pageOps("Erros no código", "lsp") ++ pageOps("Plugins", "plugins") ++ pageOps("Sobre", "sobre") ++ [_]Op{
+} ++ pageOps("Minha conta", "conta") ++ pageOps("Privacidade", "privacidade") ++ pageOps("Alertas e filtros", "filtros") ++ pageOps("Aparência", "aparencia") ++ ops_fontes ++ pageOps("Acessibilidade", "acessibilidade") ++ pageOps("Chat", "chat") ++ pageOps("Voz", "voz") ++ pageOps("Vídeo e Câmera", "video") ++ pageOps("Notificações", "notificacoes") ++ pageOps("Atalhos de teclado", "atalhos") ++ pageOps("Idioma", "idioma") ++ pageOps("Rede", "rede") ++ pageOps("Avançado", "avancado") ++ pageOps("Desempenho", "desempenho") ++ pageOps("Erros no código", "lsp") ++ pageOps("Plugins", "plugins") ++ pageOps("Sobre", "sobre") ++ [_]Op{
     key(c.ImGuiKey_Escape),
     .{ .wait = 350 },
 };

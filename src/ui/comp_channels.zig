@@ -856,7 +856,8 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         d.rect(ctx.dl, cr, cbg, v_rad);
         const cink = if (on) d.Rgba.white else ctx.col(.text).alpha(0.9);
         icons.camera(ctx.dl, cr.x + cr.w / 2, cr.y + cr.h / 2, cink.u(), !on);
-        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera", "Turn camera off") else i18n.tr("Ligar câmera", "Turn camera on"), ch_hit.hovered);
+        c.ImDrawList_AddTriangleFilled(ctx.dl, d.v(cr.right() - 7, cr.bottom() - 4), d.v(cr.right() - 3, cr.bottom() - 4), d.v(cr.right() - 5, cr.bottom() - 1.5), cink.alpha(0.75).u());
+        d.tip(ctx, cr, if (on) i18n.tr("Desligar câmera · botão direito: escolher câmera", "Turn camera off · right-click: pick camera") else i18n.tr("Ligar câmera · botão direito: escolher câmera", "Turn camera on · right-click: pick camera"), ch_hit.hovered);
         if (ch_hit.clicked) ctx.act(.toggle_camera);
         if (ch_hit.right) devices.open(ctx, .cam, cr);
     }
@@ -871,7 +872,7 @@ fn voicePanel(ctx: *d.Ctx, fam: *d.Family, r: d.Rect, vc: Id, tty: bool) void {
         icons.screen(ctx.dl, sr.x + 12, sr.y + sr.h / 2, sink.u());
         const slbl = if (son) i18n.tr("Stop", "Stop") else "4K";
         _ = d.textClipped(ctx.dl, fam.get(.semibold), 10, sr.x + 22, d.centerY(sr, 10), sink, slbl, sr.w - 25);
-        d.tip(ctx, sr, if (son) i18n.tr("Parar compartilhamento de tela", "Stop sharing screen") else i18n.tr("Compartilhar tela / Go Live 4K", "Share screen / Go Live 4K"), sh_hit.hovered);
+        d.tip(ctx, sr, if (son) i18n.tr("Parar compartilhamento · botão direito: opções", "Stop sharing · right-click: options") else i18n.tr("Compartilhar tela / Go Live · botão direito: opções", "Share screen / Go Live · right-click: options"), sh_hit.hovered);
         if (sh_hit.clicked) ctx.act(if (son) .stop_screen_share else .open_stream_picker);
         if (sh_hit.right) devices.open(ctx, .share, sr);
     }

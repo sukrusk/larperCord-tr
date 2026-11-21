@@ -1,5 +1,18 @@
 # O que mudou em cada versão
 
+## 0.8.1
+
+**Aba Vídeo e Câmera**
+- Seletor de webcam, prévia ao vivo, qualidade própria da câmera (`480p`/`720p`/`1080p`, `15`/`30`/`60 FPS`, bitrate), perfis de desempenho de tela, captura (`Auto`/`DXGI`/`WGC`) e controle remoto ganharam uma aba própria em **Configurações → Vídeo e Câmera**, logo abaixo de Voz.
+- Webcams agora são detectadas automaticamente ao abrir a aba (com botão Atualizar), sem precisar clicar antes para aparecerem.
+- Adicionados indicador de menu e dicas de botão direito nos botões de câmera e compartilhamento da barra de voz e call.
+
+**AnyDesk, Cursor e Telas**
+- Corrigido o ponteiro do mouse invisível na captura DXGI: `dxgi_cap.zig` agora captura e compõe cursores monocromáticos (AND/XOR), coloridos pré-multiplicados e masked-color direto na textura da GPU (com bootstrap via `GetCursorInfo` no quadro #0 e alternância ao vivo), além de configurar o cursor antes de `StartCapture` e suportar redimensionamento dinâmico (`Recreate`) no `wgc_cap.zig`.
+- Corrigida a enumeração de aplicativos (`wgc_cap.zig`) que descartava janelas cujo título UTF-8 passava de 96 bytes (`utf16ToUtf8Truncated`, filtro `WS_EX_TOOLWINDOW`, até 48 janelas), adicionadas contagens e posição dos monitores (`Esq`/`Dir`/`Principal`) no seletor e atalho **"Escolher Aplicativo / Janela…"** direto no botão direito de compartilhar.
+- Corrigido o AnyDesk em 2 e 3 monitores (`input_inject.zig` usando `GetMonitorInfoW` no monitor capturado ou `DWMWA_EXTENDED_FRAME_BOUNDS` na janela ativa, inclusive com coordenadas negativas à esquerda, além de Numpad completo e tecla ISO `<>|` `0x56`).
+- Melhorias no AnyDesk P2P (`remote_ctrl.zig`, `stream_view.zig`): `SendInput` fora do mutex para não travar vídeo a 60fps, telemetria de RTT ao vivo (`ms`), acumulador de scroll fracionário, botões X1/X2, `.release_all` ao perder foco, STUN duplo Google/Cloudflare e botões **`M1`/`M2`/`M3`** no HUD para trocar o monitor do host ao vivo.
+
 ## 0.8.0
 
 **RAM Mínima e Limpeza**

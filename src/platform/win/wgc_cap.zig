@@ -21,6 +21,7 @@ const IsIconicFn = *const fn (HWND) callconv(.winapi) BOOL;
 const GetWindowTextWFn = *const fn (HWND, [*]u16, i32) callconv(.winapi) i32;
 const GetWindowRectFn = *const fn (HWND, *RECT) callconv(.winapi) BOOL;
 const GetWindowThreadProcessIdFn = *const fn (HWND, *DWORD) callconv(.winapi) DWORD;
+const GetWindowLongWFn = *const fn (HWND, i32) callconv(.winapi) i32;
 const DwmGetWindowAttributeFn = *const fn (HWND, DWORD, *anyopaque, DWORD) callconv(.winapi) HRESULT;
 const OpenProcessFn = *const fn (DWORD, BOOL, DWORD) callconv(.winapi) ?*anyopaque;
 const QueryFullProcessImageNameWFn = *const fn (?*anyopaque, DWORD, [*]u16, *DWORD) callconv(.winapi) BOOL;
@@ -41,6 +42,7 @@ const EnumCtx = struct {
     get_text: GetWindowTextWFn,
     get_rect: GetWindowRectFn,
     get_pid: GetWindowThreadProcessIdFn,
+    get_long: ?GetWindowLongWFn = null,
     dwm_attr: ?DwmGetWindowAttributeFn,
     open_proc: ?OpenProcessFn = null,
     query_img: ?QueryFullProcessImageNameWFn = null,
@@ -59,7 +61,7 @@ fn fillExeName(ctx: *const EnumCtx, tgt: *media_if.WindowTarget, pid: DWORD) voi
     var cap: DWORD = path_w.len;
     if (qi(proc, 0, &path_w, &cap) == 0 or cap == 0) return;
     var path_utf8: [512]u8 = undefined;
-    const ulen = std.unicode.utf16LeToUtf8(&path_utf8, path_w[0..@min(cap, path_w.len)]) catch return;
+    const ulen = dxgi_cap.utf16ToUtf8Truncated(&path_utf8, path_w[0..@min(cap, path_w.len)]);
     const full = path_utf8[0..ulen];
     const base = if (std.mem.lastIndexOfScalar(u8, full, '\\')) |sep| full[sep + 1 ..] else full;
     const take = @min(base.len, tgt.exe_buf.len);
@@ -67,10 +69,23 @@ fn fillExeName(ctx: *const EnumCtx, tgt: *media_if.WindowTarget, pid: DWORD) voi
     tgt.exe_len = @intCast(take);
 }
 
+fn isShellHelperTitle(title: []const u8) bool {
+    return std.mem.eql(u8, title, "Program Manager") or
+        std.mem.eql(u8, title, "Default IME") or
+        std.mem.eql(u8, title, "MSCTFIME UI");
+}
+
 fn enumWinCb(hwnd: HWND, lparam: isize) callconv(.winapi) BOOL {
     const ctx: *EnumCtx = @ptrFromInt(@as(usize, @bitCast(lparam)));
     if (ctx.count >= ctx.out.len) return 0;
     if (ctx.is_visible(hwnd) == 0 or ctx.is_iconic(hwnd) != 0) return 1;
+
+    if (ctx.get_long) |gl| {
+        const ex_style: u32 = @bitCast(gl(hwnd, -20)); // GWL_EXSTYLE
+        const ws_ex_toolwindow: u32 = 0x00000080;
+        const ws_ex_appwindow: u32 = 0x00040000;
+        if ((ex_style & ws_ex_toolwindow) != 0 and (ex_style & ws_ex_appwindow) == 0) return 1;
+    }
 
     if (ctx.dwm_attr) |dwm| {
         var cloaked: DWORD = 0;
@@ -82,7 +97,7 @@ fn enumWinCb(hwnd: HWND, lparam: isize) callconv(.winapi) BOOL {
     _ = ctx.get_pid(hwnd, &pid);
     if (ctx.self_pid != 0 and pid == ctx.self_pid) return 1;
 
-    var title_u16: [96]u16 = undefined;
+    var title_u16: [256]u16 = undefined;
     const wlen = ctx.get_text(hwnd, &title_u16, title_u16.len);
     if (wlen <= 0) return 1;
 
@@ -98,9 +113,10 @@ fn enumWinCb(hwnd: HWND, lparam: isize) callconv(.winapi) BOOL {
         .width = @intCast(w),
         .height = @intCast(h),
     };
-    const ulen = std.unicode.utf16LeToUtf8(&tgt.title_buf, title_u16[0..@intCast(wlen)]) catch 0;
+    const ulen = dxgi_cap.utf16ToUtf8Truncated(&tgt.title_buf, title_u16[0..@intCast(wlen)]);
     if (ulen == 0) return 1;
     tgt.title_len = @intCast(ulen);
+    if (isShellHelperTitle(tgt.titleSlice())) return 1;
     fillExeName(ctx, &tgt, pid);
     ctx.out[ctx.count] = tgt;
     ctx.count += 1;
@@ -133,6 +149,7 @@ pub fn enumerateWindows(out: []media_if.WindowTarget) usize {
         .get_text = @ptrCast(@alignCast(c.SDL_LoadFunction(user32, "GetWindowTextW") orelse return 0)),
         .get_rect = @ptrCast(@alignCast(c.SDL_LoadFunction(user32, "GetWindowRect") orelse return 0)),
         .get_pid = @ptrCast(@alignCast(c.SDL_LoadFunction(user32, "GetWindowThreadProcessId") orelse return 0)),
+        .get_long = if (c.SDL_LoadFunction(user32, "GetWindowLongW")) |gl| @ptrCast(@alignCast(gl)) else null,
         .dwm_attr = if (dwmapi) |d| @ptrCast(@alignCast(c.SDL_LoadFunction(d, "DwmGetWindowAttribute"))) else null,
         .open_proc = if (k32) |k| @ptrCast(@alignCast(c.SDL_LoadFunction(k, "OpenProcess"))) else null,
         .query_img = if (k32) |k| @ptrCast(@alignCast(c.SDL_LoadFunction(k, "QueryFullProcessImageNameW"))) else null,
@@ -246,6 +263,7 @@ pub const Capturer = struct {
             return error.WgcSessionFailed;
         }
 
+        self.setCursorCapture(true);
         const start_cap = com.slot(self.session.?, 6, *const fn (*anyopaque) callconv(.winapi) HRESULT);
         if (!com.succeeded(start_cap(self.session.?))) return error.WgcStartFailed;
 
@@ -279,6 +297,15 @@ pub const Capturer = struct {
         const frame_obj = latest orelse return null;
         defer closeAndRelease(frame_obj);
 
+        const get_content_size = com.slot(frame_obj, 8, *const fn (*anyopaque, *u64) callconv(.winapi) HRESULT);
+        var content_sz_packed: u64 = 0;
+        var cw_i: i32 = 0;
+        var ch_i: i32 = 0;
+        if (com.succeeded(get_content_size(frame_obj, &content_sz_packed))) {
+            cw_i = @bitCast(@as(u32, @truncate(content_sz_packed)));
+            ch_i = @bitCast(@as(u32, @truncate(content_sz_packed >> 32)));
+        }
+
         const get_surf = com.slot(frame_obj, 6, *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT);
         var surf: ?*anyopaque = null;
         if (!com.succeeded(get_surf(frame_obj, &surf)) or surf == null) return null;
@@ -295,10 +322,25 @@ pub const Capturer = struct {
         var desc: dxgi_cap.D3D11_TEXTURE2D_DESC = undefined;
         const get_desc = com.slot(tex.?, 10, *const fn (*anyopaque, *dxgi_cap.D3D11_TEXTURE2D_DESC) callconv(.winapi) void);
         get_desc(tex.?, &desc);
-        const w: u16 = @intCast(@max(desc.Width, 2));
-        const h: u16 = @intCast(@max(desc.Height, 2));
-        self.win_w = w;
-        self.win_h = h;
+        var w: u16 = @intCast(@max(desc.Width, 2));
+        var h: u16 = @intCast(@max(desc.Height, 2));
+        if (cw_i >= 2 and ch_i >= 2) {
+            const cw_u: u16 = @intCast(@min(cw_i, 16384));
+            const ch_u: u16 = @intCast(@min(ch_i, 16384));
+            if (cw_u != self.win_w or ch_u != self.win_h) {
+                self.win_w = cw_u;
+                self.win_h = ch_u;
+                if (self.winrt_dev) |wd| {
+                    const recreate = com.slot(pool, 6, *const fn (*anyopaque, *anyopaque, i32, i32, u64) callconv(.winapi) HRESULT);
+                    _ = recreate(pool, wd, @intCast(com.DXGI_FORMAT_B8G8R8A8_UNORM), 2, content_sz_packed);
+                }
+            }
+            w = @max(@min(w, cw_u), 2);
+            h = @max(@min(h, ch_u), 2);
+        } else {
+            self.win_w = w;
+            self.win_h = h;
+        }
 
         return try self.gpu.convertBgraToNv12(tex.?, w, h, want_cpu_copy, pts_us);
     }

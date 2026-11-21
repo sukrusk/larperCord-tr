@@ -16,6 +16,9 @@ var last_norm: ?[2]u16 = null;
 var was_down_l: bool = false;
 var was_down_r: bool = false;
 var was_down_m: bool = false;
+var was_down_x1: bool = false;
+var was_down_x2: bool = false;
+var wheel_accum: f32 = 0;
 var prev_keys: [232]bool = @splat(false);
 var last_rc_req_peer: u64 = 0;
 var zoom_fill: bool = false;
@@ -230,10 +233,43 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
         }
     }
 
+    if (!is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner) {
+        const disp_n = remote_ctrl.mgr.viewer_displays.load(.acquire);
+        const disp_cur = remote_ctrl.mgr.viewer_active_disp.load(.acquire);
+        if (disp_n > 1) {
+            const shown_n = @min(@as(usize, disp_n), 4);
+            var di: usize = shown_n;
+            while (di > 0) {
+                di -= 1;
+                var mb: [16]u8 = undefined;
+                const mlbl = std.fmt.bufPrint(&mb, "M{d}", .{di + 1}) catch "M";
+                const mw = d.width(fam.get(.semibold), 11.5, mlbl) + 14;
+                bx -= mw + 4;
+                const mr: d.Rect = .{ .x = bx, .y = by, .w = mw, .h = bh };
+                const mh = d.hit(ctx, 0x9240 + di, mr);
+                ctrl_hovered = ctrl_hovered or mh.hovered;
+                const active_d = disp_cur == di;
+                const mbg = if (active_d) ctx.col(.accent) else d.Rgba.hex(0x14161c).alpha(0.82);
+                d.rect(dl, mr, mbg.mix(d.Rgba.white, if (mh.hovered) 0.16 else 0), 6);
+                d.text(dl, fam.get(.semibold), 11.5, mr.x + 7, d.centerY(mr, 11.5), d.Rgba.white, mlbl);
+                if (mh.clicked) {
+                    remote_ctrl.mgr.sendControl(.{ .kind = .switch_display, .code = @intCast(di), .seq = remote_seq });
+                    remote_seq +%= 1;
+                }
+            }
+        }
+    }
+
     // Captura de entrada remota quando o controle estilo AnyDesk estiver ativo no espectador.
-    if (!is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner and view != null and !ctrl_hovered and ctx.st.popup == .none) {
+    const app_focused = !ctx.io.*.AppFocusLost and c.SDL_GetKeyboardFocus() != null;
+    const rc_viewer = !is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner;
+    const rc_eligible = rc_viewer and view != null and !ctrl_hovered and ctx.st.popup == .none and !ctx.st.settings.open and !ctx.st.palette.open and app_focused;
+    var captured_now = false;
+
+    if (rc_eligible) {
         const v = view.?;
         if (video_cfg.mapViewportToNormalized(ctx.mouse.x, ctx.mouse.y, vid_r.x, vid_r.y, vid_r.w, vid_r.h, v.w, v.h)) |norm| {
+            captured_now = true;
             const moved = last_norm == null or last_norm.?[0] != norm[0] or last_norm.?[1] != norm[1];
             last_norm = norm;
             if (moved) {
@@ -248,6 +284,8 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
             const l_down = c.ImGui_IsMouseDown(0);
             const r_down = c.ImGui_IsMouseDown(1);
             const m_down = c.ImGui_IsMouseDown(2);
+            const x1_down = c.ImGui_IsMouseDown(3);
+            const x2_down = c.ImGui_IsMouseDown(4);
             if (l_down != was_down_l) {
                 was_down_l = l_down;
                 remote_ctrl.mgr.sendControl(.{ .kind = .mouse_btn, .code = 1, .pressed = l_down, .x = norm[0], .y = norm[1], .seq = remote_seq });
@@ -263,11 +301,26 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
                 remote_ctrl.mgr.sendControl(.{ .kind = .mouse_btn, .code = 2, .pressed = m_down, .x = norm[0], .y = norm[1], .seq = remote_seq });
                 remote_seq +%= 1;
             }
-            if (@abs(ctx.io.*.MouseWheel) >= 0.01) {
-                const wheel_i: i16 = @intFromFloat(std.math.clamp(ctx.io.*.MouseWheel, -16, 16));
-                if (wheel_i != 0) {
-                    remote_ctrl.mgr.sendControl(.{ .kind = .mouse_wheel, .y = @bitCast(wheel_i), .seq = remote_seq });
-                    remote_seq +%= 1;
+            if (x1_down != was_down_x1) {
+                was_down_x1 = x1_down;
+                remote_ctrl.mgr.sendControl(.{ .kind = .mouse_btn, .code = 4, .pressed = x1_down, .x = norm[0], .y = norm[1], .seq = remote_seq });
+                remote_seq +%= 1;
+            }
+            if (x2_down != was_down_x2) {
+                was_down_x2 = x2_down;
+                remote_ctrl.mgr.sendControl(.{ .kind = .mouse_btn, .code = 5, .pressed = x2_down, .x = norm[0], .y = norm[1], .seq = remote_seq });
+                remote_seq +%= 1;
+            }
+            if (@abs(ctx.io.*.MouseWheel) >= 0.001) {
+                wheel_accum += ctx.io.*.MouseWheel;
+                if (@abs(wheel_accum) >= 1.0) {
+                    const clamped = std.math.clamp(@trunc(wheel_accum), -16.0, 16.0);
+                    const wheel_i: i16 = @intFromFloat(clamped);
+                    wheel_accum -= clamped;
+                    if (wheel_i != 0) {
+                        remote_ctrl.mgr.sendControl(.{ .kind = .mouse_wheel, .y = @bitCast(wheel_i), .seq = remote_seq });
+                        remote_seq +%= 1;
+                    }
                 }
             }
             if (ctx.st.remote_ctrl_perm == .full) {
@@ -276,7 +329,7 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
                     const max_k: usize = @min(@as(usize, @intCast(@max(num_k, 0))), prev_keys.len);
                     var sc: usize = 4;
                     while (sc < max_k) : (sc += 1) {
-                        if (!((sc <= 82) or (sc >= 224 and sc <= 230))) continue;
+                        if (!((sc <= 101) or (sc >= 224 and sc <= 231))) continue;
                         if (sc == 65) continue; // Nunca envia F8 (kill switch local).
                         const now_down = ks[sc];
                         if (now_down != prev_keys[sc]) {
@@ -287,16 +340,34 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
                     }
                 }
             }
-            // Retículo sutil confirmando coordenadas exatas 0..65535 sobre o frame 4K.
+            // Retículo sutil e status P2P confirmando controle ativo e latência real.
             d.border(dl, vid_r, ctx.col(.online), 4, 2);
             var nb: [64]u8 = undefined;
-            const ntxt = std.fmt.bufPrint(&nb, "AnyDesk {d},{d}  •  F8", .{ norm[0], norm[1] }) catch "AnyDesk";
+            const rtt = remote_ctrl.mgr.rtt_ms.load(.acquire);
+            const peer_conn = remote_ctrl.mgr.peerConnected();
+            const ntxt = if (peer_conn and rtt > 0)
+                (std.fmt.bufPrint(&nb, "AnyDesk {d}ms  •  {d},{d}  •  F8", .{ rtt, norm[0], norm[1] }) catch "AnyDesk")
+            else if (peer_conn)
+                (std.fmt.bufPrint(&nb, "AnyDesk P2P  •  {d},{d}  •  F8", .{ norm[0], norm[1] }) catch "AnyDesk")
+            else
+                (std.fmt.bufPrint(&nb, "AnyDesk P2P…  •  F8", .{}) catch "AnyDesk");
             const nw = d.width(fam.get(.semibold), 11.5, ntxt) + 18;
             const nr: d.Rect = .{ .x = r.x + 10, .y = r.bottom() - 32, .w = nw, .h = 22 };
             d.rect(dl, nr, ctx.col(.online).alpha(0.85), 5);
             d.text(dl, fam.get(.semibold), 11.5, nr.x + 9, d.centerY(nr, 11.5), d.Rgba.white, ntxt);
         }
     }
+    if (rc_viewer and !captured_now and hasHeldRemote()) {
+        remote_ctrl.mgr.sendControl(.{ .kind = .release_all, .seq = remote_seq });
+        remote_seq +%= 1;
+        resetRemoteInput();
+    }
+}
+
+fn hasHeldRemote() bool {
+    if (was_down_l or was_down_r or was_down_m or was_down_x1 or was_down_x2) return true;
+    for (prev_keys) |k| if (k) return true;
+    return false;
 }
 
 /// Libera todo o estado local de mouse/teclado remoto ao encerrar.
@@ -305,6 +376,9 @@ pub fn resetRemoteInput() void {
     was_down_l = false;
     was_down_r = false;
     was_down_m = false;
+    was_down_x1 = false;
+    was_down_x2 = false;
+    wheel_accum = 0;
     @memset(&prev_keys, false);
 }
 

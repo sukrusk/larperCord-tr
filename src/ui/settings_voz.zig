@@ -162,57 +162,56 @@ pub fn draw(p: anytype) void {
     soundList(p, s);
 
     p.divider();
-    p.heading(i18n.tr("Vídeo e Transmissão 4K", "4K Video & Screen Share"));
+    p.heading(i18n.tr("Vídeo e Câmera", "Video & Camera"));
     p.note(i18n.tr(
-        "Resolução padrão para câmera e Go Live em NV12 de baixa memória (~11,9 MiB em 4K).",
-        "Default camera & Go Live quality using low-RAM NV12 frames (~11.9 MiB at 4K).",
+        "Escolha sua webcam, qualidade da câmera, tela 4K e perfil de desempenho na aba Vídeo e Câmera.",
+        "Pick your webcam, camera quality, 4K screen share and performance profile in Video & Camera.",
     ));
-    p.segmented(&.{ "720p", "1080p", "1440p", "4K" }, &s.video_res);
-    p.segmented(&.{ "30 FPS", "60 FPS" }, &s.video_fps);
-    p.segmented(&.{ "Auto", "H.264", "HEVC", "AV1" }, &s.video_codec);
-    var br_idx = bitrateToIdx(s.video_bitrate_mbps);
-    const prev_br_idx = br_idx;
-    p.segmented(&.{ i18n.tr("Otomatik", "Auto"), "4 Mbps", "8 Mbps", "15 Mbps", "25 Mbps" }, &br_idx);
-    if (br_idx != prev_br_idx) s.video_bitrate_mbps = idxToMbps(br_idx);
-    p.toggle(
-        i18n.tr("Aceleração em GPU (DX11/Media Foundation)", "GPU hardware acceleration (DX11/Media Foundation)"),
-        i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
-        &s.video_hw,
-    );
-    p.segmented(&.{ i18n.tr("Velocidade", "Speed"), i18n.tr("Equilibrado", "Balanced"), i18n.tr("Qualidade", "Quality") }, &s.video_perf_preset);
-    p.segmented(&.{ "Auto", "DXGI", "WGC" }, &s.video_cap_mode);
-    var kf_idx = kfSecToIdx(s.video_kf_sec);
-    const prev_kf_idx = kf_idx;
-    p.segmented(&.{ "Keyframe 1s", "Keyframe 2s", "Keyframe 4s" }, &kf_idx);
-    if (kf_idx != prev_kf_idx) s.video_kf_sec = idxToKfSec(kf_idx);
-    p.segmented(&.{ "2 FPS (Eco)", "4 FPS", "10 FPS" }, &s.video_static_fps);
-    p.note(i18n.tr(
-        "No Discord SFU o app negocia H.264 + DAVE + OP 12 para aparecer no cliente oficial do Discord; WGC evita congelamento em tela parada. HEVC/AV1 valem para P2P direto.",
-        "On Discord SFU, the app negotiates H.264 + DAVE + OP 12 so streams appear in the official Discord client; WGC prevents static-screen stalls. HEVC/AV1 apply to direct P2P.",
-    ));
-    p.heading(i18n.tr("Câmera (Desempenho & RAM)", "Camera (Performance & RAM)"));
-    p.segmented(&.{ "480p", "720p", "1080p", i18n.tr("Igual à tela", "Match stream") }, &s.video_cam_res);
-    p.segmented(&.{ "15 FPS", "30 FPS", "60 FPS" }, &s.video_cam_fps);
-    var cbr_idx = camBitrateToIdx(s.video_cam_bitrate_mbps);
-    const prev_cbr_idx = cbr_idx;
-    p.segmented(&.{ "Auto", "2 Mbps", "4 Mbps", "6 Mbps", "10 Mbps" }, &cbr_idx);
-    if (cbr_idx != prev_cbr_idx) s.video_cam_bitrate_mbps = idxToCamMbps(cbr_idx);
-    p.toggle(
-        i18n.tr("Kamera ön izlemesini aynala", "Mirror camera self-preview"),
-        i18n.tr("Yalnızca kendi ekranındaki kamera ön izlemesini yatay çevirir.", "Horizontally flips your own camera preview locally."),
-        &s.video_cam_mirror,
-    );
-    p.toggle(
-        i18n.tr("Paylaşımda fare imlecini göster", "Show mouse cursor while sharing"),
-        i18n.tr("Pencere veya monitör paylaşımında fare imlecini videoya dahil eder.", "Includes mouse cursor when sharing windows or screens."),
-        &s.video_cursor,
-    );
-    p.toggle(
-        i18n.tr("Kendi yayınımı sahnede ön izle", "Preview own stream on stage"),
-        i18n.tr("Kapalıysa yalnızca karşıya gider, yerel ön izleme kopyası yapılmaz.", "When off, streams to peers without local preview readback."),
-        &s.video_self_preview,
-    );
-    if (p.buttonSoft(i18n.tr("Detectar câmeras", "Detect cameras"))) {
+    if (p.buttonSoft(i18n.tr("Abrir Vídeo e Câmera", "Open Video & Camera"))) s.page = .video;
+}
+
+pub fn drawVideo(p: anytype) void {
+    const ctx = p.ctx;
+    const s = &ctx.st.settings;
+
+    p.title(i18n.tr("Vídeo e Câmera", "Video & Camera"));
+
+    if (!cam_probed and !qa.on()) {
+        cam_devs_n = live_video.eng.listCameras(&cam_devs);
+        cam_probed = true;
+        if (cam_devs_n > 0 and s.video_cam_idx >= cam_devs_n) s.video_cam_idx = 0;
+    }
+
+    p.heading(i18n.tr("Câmera e dispositivos", "Camera & devices"));
+    if (cam_devs_n > 0) {
+        for (0..cam_devs_n) |ci| {
+            const cr: d.Rect = .{ .x = p.x, .y = p.y, .w = @min(p.w, 460), .h = 36 };
+            const ch = d.hit(ctx, p.id(), cr);
+            qa.mark(cr, "cam-dev:{d}", .{ci});
+            const sel = s.video_cam_idx == ci;
+            const rad = @max(ctx.th.radius, 6);
+            d.rect(p.dl, cr, if (sel) ctx.col(.selected) else if (ch.hovered) ctx.col(.hover) else ctx.col(.elevated), rad);
+            d.border(p.dl, cr, if (sel) ctx.col(.accent) else ctx.col(.border), rad, if (sel) 1.5 else 1);
+            var cb_name: [120]u8 = undefined;
+            const clbl = std.fmt.bufPrint(&cb_name, "{d}. {s}", .{ ci + 1, cam_devs[ci].slice() }) catch cam_devs[ci].slice();
+            _ = d.textClipped(p.dl, p.font(if (sel) .semibold else .medium), 13.5, cr.x + 12, d.centerY(cr, 13.5), ctx.col(.text), clbl, cr.w - 24);
+            if (ch.clicked) {
+                s.video_cam_idx = @intCast(ci);
+                if (ctx.st.cam_on) {
+                    ctx.act(.{ .switch_camera = s.video_cam_idx });
+                } else if (cam_test_on) {
+                    _ = startConfiguredCamTest(s);
+                }
+            }
+            p.y += 42;
+        }
+    } else {
+        p.note(i18n.tr(
+            "Nenhuma webcam física detectada agora (o teste ainda abre uma prévia de demonstração).",
+            "No physical webcam detected right now (testing still opens a demo preview).",
+        ));
+    }
+    if (p.buttonSoft(i18n.tr("Atualizar câmeras", "Refresh cameras"))) {
         cam_devs_n = if (qa.on()) 0 else live_video.eng.listCameras(&cam_devs);
         cam_probed = true;
         if (cam_devs_n > 0) {
@@ -237,29 +236,6 @@ pub fn draw(p: anytype) void {
                 }
             }
         }
-    }
-    if (cam_probed and cam_devs_n > 0) {
-        for (0..cam_devs_n) |ci| {
-            const cr: d.Rect = .{ .x = p.x, .y = p.y, .w = @min(p.w, 460), .h = 34 };
-            const ch = d.hit(ctx, p.id(), cr);
-            const sel = s.video_cam_idx == ci;
-            const rad = @max(ctx.th.radius, 6);
-            d.rect(p.dl, cr, if (sel) ctx.col(.selected) else if (ch.hovered) ctx.col(.hover) else ctx.col(.elevated), rad);
-            d.border(p.dl, cr, if (sel) ctx.col(.accent) else ctx.col(.border), rad, if (sel) 1.5 else 1);
-            var cb_name: [120]u8 = undefined;
-            const clbl = std.fmt.bufPrint(&cb_name, "{d}. {s}", .{ ci + 1, cam_devs[ci].slice() }) catch cam_devs[ci].slice();
-            _ = d.textClipped(p.dl, p.font(if (sel) .semibold else .medium), 13.5, cr.x + 12, d.centerY(cr, 13.5), ctx.col(.text), clbl, cr.w - 24);
-            if (ch.clicked) {
-                s.video_cam_idx = @intCast(ci);
-                if (ctx.st.cam_on) {
-                    ctx.act(.{ .switch_camera = s.video_cam_idx });
-                } else if (cam_test_on) {
-                    _ = startConfiguredCamTest(s);
-                }
-            }
-            p.y += 40;
-        }
-        p.y += 4;
     }
     if (cam_test_on or ctx.st.cam_on) {
         anim.every(33);
@@ -296,6 +272,59 @@ pub fn draw(p: anytype) void {
         }
         p.y += ph + 12;
     }
+
+    p.heading(i18n.tr("Câmera (Desempenho & RAM)", "Camera (Performance & RAM)"));
+    p.segmented(&.{ "480p", "720p", "1080p", i18n.tr("Igual à tela", "Match stream") }, &s.video_cam_res);
+    p.segmented(&.{ "15 FPS", "30 FPS", "60 FPS" }, &s.video_cam_fps);
+    var cbr_idx = camBitrateToIdx(s.video_cam_bitrate_mbps);
+    const prev_cbr_idx = cbr_idx;
+    p.segmented(&.{ "Auto", "2 Mbps", "4 Mbps", "6 Mbps", "10 Mbps" }, &cbr_idx);
+    if (cbr_idx != prev_cbr_idx) s.video_cam_bitrate_mbps = idxToCamMbps(cbr_idx);
+    p.toggle(
+        i18n.tr("Kamera ön izlemesini aynala", "Mirror camera self-preview"),
+        i18n.tr("Yalnızca kendi ekranındaki kamera ön izlemesini yatay çevirir.", "Horizontally flips your own camera preview locally."),
+        &s.video_cam_mirror,
+    );
+
+    p.divider();
+    p.heading(i18n.tr("Vídeo e Transmissão 4K", "4K Video & Screen Share"));
+    p.note(i18n.tr(
+        "Resolução padrão para Go Live em NV12 de baixa memória (~11,9 MiB em 4K).",
+        "Default Go Live quality using low-RAM NV12 frames (~11.9 MiB at 4K).",
+    ));
+    p.segmented(&.{ "720p", "1080p", "1440p", "4K" }, &s.video_res);
+    p.segmented(&.{ "30 FPS", "60 FPS" }, &s.video_fps);
+    p.segmented(&.{ "Auto", "H.264", "HEVC", "AV1" }, &s.video_codec);
+    var br_idx = bitrateToIdx(s.video_bitrate_mbps);
+    const prev_br_idx = br_idx;
+    p.segmented(&.{ i18n.tr("Otomatik", "Auto"), "4 Mbps", "8 Mbps", "15 Mbps", "25 Mbps" }, &br_idx);
+    if (br_idx != prev_br_idx) s.video_bitrate_mbps = idxToMbps(br_idx);
+    p.toggle(
+        i18n.tr("Aceleração em GPU (DX11/Media Foundation)", "GPU hardware acceleration (DX11/Media Foundation)"),
+        i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
+        &s.video_hw,
+    );
+    p.segmented(&.{ i18n.tr("Velocidade", "Speed"), i18n.tr("Equilibrado", "Balanced"), i18n.tr("Qualidade", "Quality") }, &s.video_perf_preset);
+    p.segmented(&.{ "Auto", "DXGI", "WGC" }, &s.video_cap_mode);
+    var kf_idx = kfSecToIdx(s.video_kf_sec);
+    const prev_kf_idx = kf_idx;
+    p.segmented(&.{ "Keyframe 1s", "Keyframe 2s", "Keyframe 4s" }, &kf_idx);
+    if (kf_idx != prev_kf_idx) s.video_kf_sec = idxToKfSec(kf_idx);
+    p.segmented(&.{ "2 FPS (Eco)", "4 FPS", "10 FPS" }, &s.video_static_fps);
+    p.note(i18n.tr(
+        "No Discord SFU o app negocia H.264 + DAVE + OP 12 para aparecer no cliente oficial do Discord; WGC evita congelamento em tela parada. HEVC/AV1 valem para P2P direto.",
+        "On Discord SFU, the app negotiates H.264 + DAVE + OP 12 so streams appear in the official Discord client; WGC prevents static-screen stalls. HEVC/AV1 apply to direct P2P.",
+    ));
+    p.toggle(
+        i18n.tr("Paylaşımda fare imlecini göster", "Show mouse cursor while sharing"),
+        i18n.tr("Pencere veya monitör paylaşımında fare imlecini videoya dahil eder.", "Includes mouse cursor when sharing windows or screens."),
+        &s.video_cursor,
+    );
+    p.toggle(
+        i18n.tr("Kendi yayınımı sahnede ön izle", "Preview own stream on stage"),
+        i18n.tr("Kapalıysa yalnızca karşıya gider, yerel ön izleme kopyası yapılmaz.", "When off, streams to peers without local preview readback."),
+        &s.video_self_preview,
+    );
     var cfg_b: [160]u8 = undefined;
     const res_enum = video_cfg.Resolution.fromByte(s.video_res);
     const dims = res_enum.dims();

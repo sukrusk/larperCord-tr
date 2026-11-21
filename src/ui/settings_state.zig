@@ -15,6 +15,7 @@ pub const Page = enum {
     acessibilidade,
     chat,
     voz,
+    video,
     notificacoes,
     atalhos,
     idioma,

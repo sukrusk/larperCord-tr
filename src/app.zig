@@ -2907,7 +2907,7 @@ pub const App = struct {
                 if (st.settings.remote_ctrl_allow == 0) {
                     app.cmd(.{ .remote_ctrl_respond = .{ .peer = rq.peer, .perm = .off } });
                     const who = app.store.nameIn(st.guild, rq.peer) orelse "?";
-                    st.showToast(now(), false, "{s} pediu controle remoto (ative em Config → Voz)", "{s} asked for remote control (enable in Settings → Voice)", .{who});
+                    st.showToast(now(), false, "{s} pediu controle remoto (ative em Config → Vídeo e Câmera)", "{s} asked for remote control (enable in Settings → Video & Camera)", .{who});
                 } else {
                     st.remote_ctrl_req = .{ .peer = rq.peer, .perm = rq.perm };
                 }
@@ -2921,7 +2921,7 @@ pub const App = struct {
                     st.showToast(now(), true, "controle remoto recusado", "remote control denied", .{});
                 } else if (rs.status == .active_host and !app.store.demo and !app.opts.qa) {
                     if (!st.stream_on and !live_video.eng.watchActive()) {
-                        var disps: [4]@import("platform/media_if.zig").DisplayTarget = undefined;
+                        var disps: [8]@import("platform/media_if.zig").DisplayTarget = undefined;
                         const cap_be = @import("platform/capture_backend.zig");
                         const nd = cap_be.enumerateDisplays(&disps);
                         var target_disp: u64 = 0;
@@ -2930,18 +2930,29 @@ pub const App = struct {
                             break;
                         };
                         if (target_disp == 0 and nd > 0) target_disp = disps[0].id;
+                        const mbps = st.settings.video_bitrate_mbps;
                         const cfg: video_cfg.StreamConfig = .{
                             .kind = .screen,
                             .target_id = target_disp,
                             .resolution = video_cfg.Resolution.fromByte(st.settings.video_res),
                             .fps = if (st.settings.video_fps == 1) 60 else 30,
                             .codec = .h264,
+                            .bitrate_kbps = if (mbps == 0) (if (st.settings.low_ram_mode) 12_000 else 20_000) else @as(u32, mbps) * 1000,
                             .transport = .p2p_direct,
                             .share_audio = false,
+                            .capture_cursor = st.settings.video_cursor,
                             .remote_perm = rs.perm,
                             .hw_accel = st.settings.video_hw,
+                            .perf_preset = video_cfg.PerfPreset.fromByte(st.settings.video_perf_preset),
+                            .capture_backend = video_cfg.CaptureBackend.fromByte(st.settings.video_cap_mode),
+                            .static_refresh_ms = video_cfg.staticRefreshMs(st.settings.video_static_fps),
+                            .keyframe_sec = if (st.settings.video_kf_sec > 0) st.settings.video_kf_sec else 2,
                         };
                         if (live_video.eng.startNativeCapture(cfg)) app.auto_rc_capture = true;
+                    } else if (st.stream_on) {
+                        var scfg = st.stream_cfg;
+                        scfg.remote_perm = rs.perm;
+                        live_video.eng.refreshRemoteTarget(scfg);
                     }
                 } else if (rs.status == .active_viewer and !app.store.demo and !app.opts.qa) {
                     if (st.watch_owner == 0 and rs.peer != 0) st.watch_owner = rs.peer;
@@ -3838,6 +3849,28 @@ pub const App = struct {
             mouse.frame();
             last_frame_ms = now_ms;
             live_video.eng.tick(now_ms);
+            if (!app.opts.qa and app.st.remote_ctrl_status == .active_host) {
+                if (remote_ctrl.mgr.consumeSwitchDisplay()) |disp_idx| {
+                    var disps: [8]@import("platform/media_if.zig").DisplayTarget = undefined;
+                    const cap_be = @import("platform/capture_backend.zig");
+                    const nd = cap_be.enumerateDisplays(&disps);
+                    if (nd > 0) {
+                        const chosen = @min(@as(usize, disp_idx), nd - 1);
+                        var ncfg = live_video.eng.native_cfg;
+                        if (ncfg.resolution == .p2160 and !app.st.stream_on) {
+                            ncfg.resolution = video_cfg.Resolution.fromByte(app.st.settings.video_res);
+                            ncfg.fps = if (app.st.settings.video_fps == 1) 60 else 30;
+                            ncfg.capture_cursor = app.st.settings.video_cursor;
+                            ncfg.hw_accel = app.st.settings.video_hw;
+                            ncfg.transport = .p2p_direct;
+                        }
+                        ncfg.kind = .screen;
+                        ncfg.target_id = disps[chosen].id;
+                        if (app.st.stream_on) app.st.stream_cfg = ncfg;
+                        _ = live_video.eng.startNativeCapture(ncfg);
+                    }
+                }
+            }
             anim.now_ms = now_ms;
             anim.next_wake_ms = std.math.maxInt(i64);
             anim.clock_wake_ms = std.math.maxInt(i64);
@@ -3951,7 +3984,7 @@ pub const App = struct {
             app_presenca.frame(app);
             app.askChannelInfo();
             voz_audio.setPageOpen(set.open and set.page == .voz and app.store.ready);
-            settings_voz.stopPreviewIfClosed(set.open, set.page == .voz, app.st.cam_on);
+            settings_voz.stopPreviewIfClosed(set.open, set.page == .video, app.st.cam_on);
             plugin_host.frame(app);
             @import("ui/attachments.zig").hide_embeds = !set.show_embeds;
             app.store.keep_log = set.message_log;
