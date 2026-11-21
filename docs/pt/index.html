@@ -45,7 +45,7 @@
   <canvas class="pixels" aria-hidden="true"></canvas>
   <div class="hero-first">
     <div class="hero-text">
-      <span class="tag"><b>layout</b> <i>{ row {</i> &nbsp;// cliente nativo e não oficial de Discord · v0.7.0</span>
+      <span class="tag"><b>layout</b> <i>{ row {</i> &nbsp;// cliente nativo e não oficial de Discord · v0.8.0</span>
       <h1><span data-g="O Discord,">O Discord,</span><em data-g="sem o navegador">sem o navegador</em><span data-g="dentro.">dentro.</span></h1>
       <p class="typed" aria-hidden="true"><span class="typed-cmd"></span><span class="typed-out"></span><i class="typed-cur"></i></p>
       <div class="hero-copy">
@@ -284,7 +284,7 @@
       <li><strong>Uma tela da call no estilo do tema.</strong> Um quadro por pessoa, com a foto e o apelido que ela usa naquele servidor, o que está jogando e quem está transmitindo. Sozinho na call, o mascote cochila ao lado de um botão de convite.</li>
       <li><strong>Sem call, sem custo.</strong> A thread de voz só nasce quando você entra. Antes disso, o áudio só abre se você entrar nas configurações de voz.</li>
       <li><strong>Seu microfone, suas regras.</strong> Escolha os dispositivos, mesmo no meio da call. Detecção de voz com limiar automático ou aperte para falar, filtro passa-altas, porta de ruído e supressão de ruído com RNNoise, medidor ao vivo e teste de microfone.</li>
-      <li><strong>Limites sinceros.</strong> No Linux, o aperte para falar só funciona com a janela em foco (no Windows, funciona de qualquer janela). Sem compartilhamento de tela nem câmera. <a href="../pt/guide/voice.html">Guia de voz →</a></li>
+      <li><strong>Limites sinceros.</strong> No Linux, o aperte para falar só funciona com a janela em foco, e a captura de tela/câmera funciona por enquanto no Windows (Linux nos planos). <a href="../pt/guide/voice.html">Guia de voz →</a></li>
     </ul>
   </div>
   <span class="close">}</span>
@@ -377,7 +377,7 @@
       <tr><th>Notificações</th><td><span class="chip part">parcial</span></td><td>Pelo <code>notify-send</code> no Linux e pela bandeja no Windows. Clicar não abre o canal</td></tr>
       <tr><th>Acessibilidade</th><td><span class="chip part">parcial</span></td><td>Escala de fonte, tamanho da interface, reduzir movimento, paleta por teclado, atalhos que dá para trocar. Sem foco visível nem alto contraste</td></tr>
       <tr><th>Plataformas</th><td><span class="chip part">parcial</span></td><td>Linux e Windows 10/11. Testado todo dia no Arch com Hyprland; o Windows é novo.</td></tr>
-            <tr><th>Compartilhar tela e câmera</th><td><span class="chip no">falta</span></td><td></td></tr>
+      <tr><th>Compartilhar tela e câmera</th><td><span class="chip part">parcial</span></td><td>No Windows, tela DXGI/WGC até 4K 60fps com áudio isolado por processo e câmera, H.264 + DAVE E2EE compatível com o app oficial. Captura no Linux está nos planos</td></tr>
     </tbody>
   </table>
   </div>
@@ -416,13 +416,13 @@
     <div class="dl-card" data-os="windows">
       <h3>Windows <small>10 / 11, x64</small></h3>
       <a class="btn" href="https://github.com/sukrusk/larperCord-tr/releases/latest/download/larpercord-windows-x86_64.zip" data-asset="larpercord-windows-x86_64.zip">Baixar para Windows ↓</a>
-      <p>Descompacte e abra o <code>larpercord.exe</code> da pasta <code>larperCord</code>, com as três DLLs ao lado dele. Descompacte num lugar onde você pode gravar, fora de <code>C:\Program Files</code>, para ele conseguir se atualizar. Ele ainda não tem assinatura de código: se o SmartScreen barrar, clique em <em>Mais informações</em> e depois em <em>Executar assim mesmo</em>.</p>
+      <p>Descompacte e abra o <code>larpercord.exe</code> da pasta <code>larperCord</code> (executável único desde a 0.6.7). Descompacte num lugar onde você pode gravar, fora de <code>C:\Program Files</code>, para ele conseguir se atualizar. Ele ainda não tem assinatura de código: se o SmartScreen barrar, clique em <em>Mais informações</em> e depois em <em>Executar assim mesmo</em>.</p>
       <p>Ou instale para o seu usuário, no PowerShell, sem administrador. Ele vai para <code>%LOCALAPPDATA%\Programs\larperCord</code>, com uma entrada no menu Iniciar:</p>
       <div class="dl-copy"><code class="dl-cmd">irm https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.ps1 | iex</code><button class="copy" type="button" data-copy>copy</button></div>
     </div>
   </div>
   </div>
-  <p class="foot reveal"><span id="dl-version">v0.7.0 · </span><a href="https://github.com/sukrusk/larperCord-tr/releases">Todas as versões e checksums</a> · <a href="https://github.com/sukrusk/larperCord-tr/blob/main/CHANGELOG.pt-BR.md">O que mudou</a> · <a href="../pt/guide/getting-started.html#instalar">Guia de instalação</a></p>
+  <p class="foot reveal"><span id="dl-version">v0.8.0 · </span><a href="https://github.com/sukrusk/larperCord-tr/releases">Todas as versões e checksums</a> · <a href="https://github.com/sukrusk/larperCord-tr/blob/main/CHANGELOG.pt-BR.md">O que mudou</a> · <a href="../pt/guide/getting-started.html#instalar">Guia de instalação</a></p>
   <span class="close">}</span>
   <link rel="stylesheet" href="../assets/site/extra.css">
   <script src="../assets/site/os.js" defer></script>
@@ -482,7 +482,7 @@
 
 <footer class="colophon">
   <div>
-    <p><strong style="color:var(--text)">larperCord</strong> v0.7.0</p>
+    <p><strong style="color:var(--text)">larperCord</strong> v0.8.0</p>
     <p>Projeto independente. Não tem relação nem aval da Discord Inc. “Discord” é uma marca de seu dono.</p>
     <p>Licença GPL-3.0. O código de terceiros segue as licenças próprias.</p>
   </div>

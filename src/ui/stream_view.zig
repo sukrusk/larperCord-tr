@@ -100,6 +100,19 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     const hud = if (view) |v| blk: {
         const fps_f = @as(f32, @floatFromInt(@max(v.fps_x10, 1))) / 10.0;
         const ram_mb = @as(f64, @floatFromInt(v.ram_bytes)) / (1024.0 * 1024.0);
+        const proc_mb = @import("../platform/sys.zig").privateKb() / 1024;
+        if (proc_mb > 0) {
+            break :blk std.fmt.bufPrint(&hud_b, "{s} [{s}]  •  {d}x{d}  •  {d:.1} fps  •  {s}  •  NV12 {d:.1} MiB  •  RAM {d} MB", .{
+                name,
+                kind_tag,
+                v.w,
+                v.h,
+                fps_f,
+                v.codec.name(),
+                ram_mb,
+                proc_mb,
+            }) catch name;
+        }
         break :blk std.fmt.bufPrint(&hud_b, "{s} [{s}]  •  {d}x{d}  •  {d:.1} fps  •  {s}  •  NV12 {d:.1} MiB", .{
             name,
             kind_tag,

@@ -24,7 +24,7 @@ Alone in a call, your tile gets smaller, and below it the mascot naps next to "J
 
 ![Alone in a call](shot:f-call-sozinho)
 
-The tiles follow the theme: its colors, corners and card style (glass in `vidro`, paper in `papel`, a clipping in `editorial`…), with a touch of each person's photo color, and the text switches color when it would be hard to read. Theme authors pick this with `call-style` and `call-tint` on the `messages` component; see [The call screen](page:themes#the-call-screen) in the theme guide. There's no camera or screen sharing.
+The tiles follow the theme: its colors, corners and card style (glass in `vidro`, paper in `papel`, a clipping in `editorial`…), with a touch of each person's photo color, and the text switches color when it would be hard to read. Theme authors pick this with `call-style` and `call-tint` on the `messages` component; see [The call screen](page:themes#the-call-screen) in the theme guide. On Windows, live camera tiles and Go Live screen-share stages (DXGI/WGC H.264 + DAVE E2EE) also appear right inside the call grid.
 
 ## Volume per person
 
@@ -83,7 +83,7 @@ A few details that took work to get right:
 
 - On Linux, push-to-talk only works while the window is focused, because SDL has no portable global shortcut. On Windows it works from any window.
 - Noise suppression targets steady noise. Typing and bangs may get through, and other voices stay.
-- No screen sharing, camera or streaming.
+- Screen sharing and camera capture currently run on Windows (DXGI/WGC + Media Foundation H.264 + DAVE E2EE); Linux capture is still a stub.
 - No automated test for a real call. QA covers the UI and the settings, with a fake audio device.
 
 ## Debugging

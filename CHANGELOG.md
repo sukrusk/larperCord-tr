@@ -1,5 +1,18 @@
 # What changed in each version
 
+## 0.8.0
+
+**Minimum RAM & Cleanup**
+- Implemented real Windows heap compaction (`GetProcessHeaps` + `HeapCompact`) and working-set trimming (`SetProcessWorkingSetSize`) in `mem_tune.zig`, releasing residual Media Foundation/NVENC/COM allocations when ending streams, stopping camera, closing search or leaving calls.
+- Fixed peer decoder retention (`removeVideoUser` now wakes `decThreadMain` immediately with a multi-user drop queue and compacts freed allocations), reduced WGC capture frame pool from `3` to `2` surfaces, sized `HwEncoder.out_buf` proportionally by resolution (`512 KiB` <=720p, `1 MiB` <=1080p, `2 MiB` 4K), shrunk audio-only UDP socket buffers (`512 KiB` vs `2 MiB` for video), and eliminated full-frame NV12 copies between camera capture and encoder threads via pointer swapping.
+- Added **Minimum RAM mode**, live **Physical RAM (Working Set)** telemetry, widened cache limits (`8..128 MB` images, `2..32 MB` GIFs, `300..5000` messages), a **Trim memory now** action button in Settings → Performance, and automatic idle search index unloading even while the window stays open.
+
+**Screen, Camera & Discord Sync**
+- Added independent Camera performance settings (`480p`/`720p`/`1080p`/Match, `15`/`30`/`60 FPS`, dedicated Mbps cap) so webcam calls default to lightweight `720p30` even when 4K screen sharing is configured.
+- Added Screen Share performance controls in Settings → Voice & Video: Encoder Preset (`Speed` CBR / `Balanced` CBR / `Quality` PeakConstrainedVBR + `QualityVsSpeed`), Capture Backend (`Auto` / `DXGI` / `WGC`), Static Screen Refresh (`2` / `4` / `10` FPS), Keyframe Interval (`1s` / `2s` / `4s` GOP), and live process RAM telemetry in the video stage HUD.
+- Locked Discord SFU camera and Go Live streams consistently to `H.264` across `OP 1`, `OP 4` (`video_codec`), `OP 12`, DAVE E2EE and RTP TX so official Discord desktop/web clients decode every stream cleanly; made PLI/FIR keyframe requests sticky until an actual IDR frame emits; added automatic DXGI -> WGC monitor fallback when starting on a 100% static desktop; surfaced Discord `STREAM_DELETE` close reasons; and added RFC 1928/1929 SOCKS5 `UDP ASSOCIATE` proxy tunneling for Voice/Video UDP.
+- Fixed the corner mascot hit overlay staying active over the server call screen leave button (`QA_SUITE=call`), and updated legacy documentation that still listed screen sharing/camera as missing.
+
 ## 0.7.0
 
 **Network, DoH & GoodbyeDPI**

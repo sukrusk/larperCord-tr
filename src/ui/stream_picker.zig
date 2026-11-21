@@ -220,19 +220,25 @@ pub fn draw(ctx: *d.Ctx) void {
         };
         const mbps = idxToMbps(draft.bitrate_idx);
         const bitrate_kbps: u32 = if (mbps > 0) @as(u32, mbps) * 1000 else res.defaultBitrateKbps(fps);
+        const transport = std.enums.fromInt(video_cfg.TransportMode, draft.transport_idx) orelse .discord_sfu;
+        const picked_codec = video_cfg.Codec.fromByte(draft.codec_idx);
         const cfg: video_cfg.StreamConfig = .{
             .kind = kind,
             .target_id = target_id,
             .resolution = res,
             .fps = fps,
-            .codec = video_cfg.Codec.fromByte(draft.codec_idx),
+            .codec = if (transport == .discord_sfu) .h264 else picked_codec,
             .bitrate_kbps = bitrate_kbps,
             .share_audio = draft.share_audio,
             .capture_cursor = draft.capture_cursor,
             .preview_self = draft.preview_self,
             .remote_perm = std.enums.fromInt(video_cfg.RemotePerm, draft.remote_idx) orelse .off,
-            .transport = std.enums.fromInt(video_cfg.TransportMode, draft.transport_idx) orelse .discord_sfu,
+            .transport = transport,
             .hw_accel = draft.hw_accel,
+            .perf_preset = video_cfg.PerfPreset.fromByte(ctx.st.settings.video_perf_preset),
+            .capture_backend = video_cfg.CaptureBackend.fromByte(ctx.st.settings.video_cap_mode),
+            .static_refresh_ms = video_cfg.staticRefreshMs(ctx.st.settings.video_static_fps),
+            .keyframe_sec = ctx.st.settings.video_kf_sec,
         };
         ctx.st.settings.video_res = draft.res_idx;
         ctx.st.settings.video_fps = draft.fps_idx;

@@ -237,7 +237,7 @@ pub const Capturer = struct {
         defer com.release(statics2);
 
         const create_ft = com.slot(statics2.?, 6, *const fn (*anyopaque, *anyopaque, i32, i32, u64, *?*anyopaque) callconv(.winapi) HRESULT);
-        if (!com.succeeded(create_ft(statics2.?, self.winrt_dev.?, @intCast(com.DXGI_FORMAT_B8G8R8A8_UNORM), 3, sz_packed, &self.pool)) or self.pool == null) {
+        if (!com.succeeded(create_ft(statics2.?, self.winrt_dev.?, @intCast(com.DXGI_FORMAT_B8G8R8A8_UNORM), 2, sz_packed, &self.pool)) or self.pool == null) {
             return error.WgcPoolFailed;
         }
 

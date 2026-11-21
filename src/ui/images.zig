@@ -27,6 +27,8 @@ const alloc = std.heap.c_allocator;
 
 /// Tempo até soltar uma imagem fora da tela.
 const idle_ms: i64 = 60_000;
+const low_ram_idle_ms: i64 = 15_000;
+pub var low_ram_mode: std.atomic.Value(bool) = .init(false);
 /// Maior arquivo que a gente baixa (o Discord aceita até 10 MB sem Nitro).
 const max_download: usize = 32 * 1024 * 1024;
 /// Limite de uma animação (GIF, WebP, APNG) já reduzida. Passando disso, GIF e WebP
@@ -515,7 +517,10 @@ pub const Cache = struct {
             while (it.next()) |e| {
                 if (e.value_ptr.state == .loading) continue;
                 const idle = cache.drawn_ms - e.value_ptr.used_ms;
-                if (idle > idle_ms or (cache.bytes > cache.budget_bytes and idle > 1000)) {
+                const low_ram = low_ram_mode.load(.monotonic);
+                const eff_idle = if (low_ram) low_ram_idle_ms else idle_ms;
+                const eff_budget = if (low_ram) @min(cache.budget_bytes, 16 * 1024 * 1024) else cache.budget_bytes;
+                if (idle > eff_idle or (cache.bytes > eff_budget and idle > 1000)) {
                     if (e.value_ptr.used_ms < oldest_ms) {
                         oldest_ms = e.value_ptr.used_ms;
                         oldest = e.key_ptr.*;

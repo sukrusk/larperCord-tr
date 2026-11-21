@@ -32,6 +32,9 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <arpa/inet.h>
+#ifndef __EMSCRIPTEN__
+#include <netdb.h>
+#endif
 #include <malloc.h>
 #include <poll.h>
 #include <signal.h>

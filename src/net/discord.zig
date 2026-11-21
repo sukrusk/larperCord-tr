@@ -1795,10 +1795,17 @@ pub const Gateway = struct {
         }
         if (std.mem.eql(u8, t, "STREAM_DELETE")) {
             const sk = j.str(j.get(d, "stream_key")) orelse return;
+            const reason = j.str(j.get(d, "reason")) orelse "";
+            const unavail = (j.get(d, "unavailable") orelse .null) == .bool and j.get(d, "unavailable").?.bool;
             const psk = parseStreamKey(sk);
             const k = ev.StreamInfo.fromKey(sk);
             g.removeStreamMeta(sk);
             if (g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk)) {
+                if (reason.len > 0) {
+                    g.notice("Transmissão encerrada pelo Discord: {s}", "Screen share ended by Discord: {s}", .{reason});
+                } else if (unavail) {
+                    g.notice("Transmissão indisponível nesta região/servidor.", "Stream unavailable in this region or server.", .{});
+                }
                 g.killStreamVoice();
                 g.stream_key_len = 0;
                 g.stream_endpoint_len = 0;
@@ -1806,6 +1813,11 @@ pub const Gateway = struct {
                 g.stream_token_len = 0;
             }
             if (g.watch_key_len > 0 and std.mem.eql(u8, g.watch_key[0..g.watch_key_len], sk)) {
+                if (reason.len > 0) {
+                    g.notice("Stream encerrada: {s}", "Stream ended: {s}", .{reason});
+                } else if (unavail) {
+                    g.notice("Stream indisponível no momento.", "Stream currently unavailable.", .{});
+                }
                 g.killWatchVoice();
                 g.watch_key_len = 0;
                 g.watch_endpoint_len = 0;
@@ -5090,10 +5102,11 @@ pub const Gateway = struct {
             .start_video => |v| {
                 g.voice_video = true;
                 const dims = v.resolution.dims();
-                const fps: u8 = if (v.fps >= 45) 60 else 30;
-                const eff_codec: video_cfg.Codec = if (v.codec == .auto) .h264 else v.codec;
+                const fps: u8 = if (v.fps >= 45) 60 else if (v.fps <= 20) 15 else 30;
+                const eff_codec: video_cfg.Codec = if (v.transport == .discord_sfu or v.codec == .auto) .h264 else v.codec;
+                const br_kbps: u32 = if (v.bitrate_kbps > 0) v.bitrate_kbps else v.resolution.defaultBitrateKbps(fps);
                 if (g.voice) |vc| {
-                    vc.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), fps, v.resolution.defaultBitrateKbps(fps));
+                    vc.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), fps, br_kbps);
                     voice_mod.media_bridge.bind(false, vc);
                 }
                 if (g.voice_channel != 0) g.queueOp(.{ .voice = .{ .guild = g.voice_guild, .channel = g.voice_channel, .mute = g.voice_mute, .deaf = g.voice_deaf, .video = true } });
@@ -5109,7 +5122,9 @@ pub const Gateway = struct {
             .start_stream => |cfg| {
                 if (g.voice_channel != 0) {
                     g.killStreamVoice();
+                    const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu or cfg.codec == .auto) .h264 else cfg.codec;
                     g.stream_cfg = cfg;
+                    g.stream_cfg.codec = eff_codec;
                     g.stream_rtc_server = 0;
                     g.stream_rtc_channel = 0;
                     g.stream_endpoint_len = 0;
@@ -5132,7 +5147,7 @@ pub const Gateway = struct {
                         .width = @intCast(dims[0]),
                         .height = @intCast(dims[1]),
                         .fps = cfg.fps,
-                        .codec = cfg.codec,
+                        .codec = eff_codec,
                         .has_audio = cfg.share_audio,
                         .remote_perm = cfg.remote_perm,
                         .stream_key = k.buf,

@@ -278,7 +278,7 @@ Remove-Item Env:LARPER_TOKEN
 The variable only counts when the app starts: if larperCord is already open, even only in the tray,
 quit it first (**Quit** in the tray icon's menu).
 
-`--demo` forces demo mode even with a token. Still missing: screen sharing and camera. Channels
+`--demo` forces demo mode even with a token. Screen sharing (DXGI/WGC up to 4K 60fps, process-isolated audio on Windows) and cameras work on Windows with H.264 + DAVE E2EE for official Discord clients (Linux video capture is still planned). Channels
 without access only show a notice. Notifications go through `notify-send` on Linux (from libnotify)
 and through the tray on Windows, and clicking one doesn't open the channel yet. Voice uses the
 system's audio backend through SDL3 and only starts its thread when you join a call.

@@ -32,7 +32,7 @@ O larperCord é um projeto jovem: versão 0.6.5, com o primeiro commit em 2 de n
 | Primeiro uso | parcial | Tela de login e modo demonstração, sem apresentação do app |
 | Plataformas | parcial | Linux e Windows. A versão para Linux exige glibc 2.34 ou mais nova. É usada todo dia no Arch com Hyprland, e aberta em contêineres de Ubuntu, Debian, Fedora, openSUSE e Arch, na demonstração, antes de cada versão. A versão para Windows só rodou no CI e num sandbox, em modo demonstração |
 | Entrar em servidor por convite | **funciona** | Pelo cartão do convite, por link ou por código, com um aviso antes. Servidores com regras ou boas-vindas abrem tudo no app |
-| Compartilhar tela e câmera | falta | |
+| Compartilhar tela e câmera | parcial | No Windows, compartilhamento de tela DXGI/WGC até 4K 60fps com áudio isolado por processo WASAPI e câmera física em H.264 + DAVE E2EE compatível com o app oficial. Captura no Linux está nos planos |
 
 ## Roadmap
 

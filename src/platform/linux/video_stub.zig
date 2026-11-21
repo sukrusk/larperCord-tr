@@ -70,7 +70,10 @@ pub const HwEncoder = struct {
         return openPref(codec, w, h, fps, bitrate_kbps, d3d11_dev, true);
     }
     pub fn openPref(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwEncoder {
-        _ = .{ codec, w, h, fps, bitrate_kbps, d3d11_dev, hw_preferred };
+        return openConfigured(codec, w, h, fps, bitrate_kbps, d3d11_dev, hw_preferred, .balanced, 2);
+    }
+    pub fn openConfigured(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_preferred: bool, perf: video_cfg.PerfPreset, keyframe_sec: u8) !HwEncoder {
+        _ = .{ codec, w, h, fps, bitrate_kbps, d3d11_dev, hw_preferred, perf, keyframe_sec };
         return error.NotImplementedOnLinuxYet;
     }
     pub fn requestKeyframe(self: *HwEncoder) void {

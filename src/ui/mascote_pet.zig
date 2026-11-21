@@ -876,6 +876,7 @@ fn secs(now: i64, ms: i64) f32 {
 fn hidden(ctx: *d.Ctx) bool {
     const st = ctx.st;
     return !st.settings.mascot_pet or st.settings.open or st.viewer != null or
+        @import("call_grid.zig").guildCall(ctx) != null or
         ctx.now_ms - slot_ms > 250 or ctx.now_ms < s.hide_until;
 }
 

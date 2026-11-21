@@ -252,8 +252,11 @@ pub fn runSelfProbe() void {
             } else |_| {}
             nv12_pat.freeNv12(&pat4k);
             const kb_gpu_after = @import("sys.zig").privateKb();
-            std.debug.print("hw-probe: 4K NVENC H264 roundtrip enc_bytes={d} dec_ok={any} after_codec_kb={d}\n", .{
-                enc4k_bytes, dec4k_ok, kb_gpu_after,
+            @import("mem_tune.zig").trim();
+            const kb_trim_after = @import("sys.zig").privateKb();
+            const ws_trim_after = @import("sys.zig").workingSetKb();
+            std.debug.print("hw-probe: 4K NVENC H264 roundtrip enc_bytes={d} dec_ok={any} after_codec_kb={d} after_trim_kb={d} ws_kb={d}\n", .{
+                enc4k_bytes, dec4k_ok, kb_gpu_after, kb_trim_after, ws_trim_after,
             });
         }
 

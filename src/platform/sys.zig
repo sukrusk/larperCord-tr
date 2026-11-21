@@ -176,7 +176,8 @@ pub fn discoverLanIp4() [4]u8 {
 }
 
 pub fn resolveHostIp4(host: [*:0]const u8) ?[4]u8 {
-    if (!windows) return null;
+    if (web) return null;
+    if (ipv4(host, 0)) |sa| return @as(*const [4]u8, @ptrCast(&sa.sin_addr)).*;
     var hints = std.mem.zeroes(c.struct_addrinfo);
     hints.ai_family = c.AF_INET;
     hints.ai_socktype = c.SOCK_DGRAM;
@@ -305,6 +306,67 @@ pub fn tcpRecv(s: Socket, buf: []u8, timeout_ms: c_int) []u8 {
     if (fds[0].revents == 0) return buf[0..0];
     const n = if (windows) c.recv(s, buf.ptr, @intCast(buf.len), 0) else c.recv(s, buf.ptr, buf.len, 0);
     return if (n > 0) buf[0..@intCast(n)] else buf[0..0];
+}
+
+pub fn tcpConnectIp4(ip: [4]u8, port: u16, timeout_ms: c_int) ?Socket {
+    if (web) return null;
+    const s = if (windows) c.socket(c.AF_INET, c.SOCK_STREAM, 0) else c.socket(c.AF_INET, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+    if (!valid(s)) return null;
+    if (windows) {
+        _ = c.SetHandleInformation(@ptrFromInt(s), c.HANDLE_FLAG_INHERIT, 0);
+        var on: c_ulong = 1;
+        _ = c.ioctlsocket(s, @bitCast(@as(u32, 0x8004667E)), &on);
+    } else {
+        _ = c.fcntl(s, c.F_SETFL, c.O_NONBLOCK);
+    }
+    var sa = std.mem.zeroes(SockAddrIn);
+    sa.sin_family = c.AF_INET;
+    sa.sin_port = std.mem.nativeToBig(u16, port);
+    @memcpy(@as(*[4]u8, @ptrCast(&sa.sin_addr)), &ip);
+    const rc = c.connect(s, @ptrCast(&sa), @sizeOf(SockAddrIn));
+    if (rc != 0) {
+        var fds = [1]PollFd{.{ .fd = s, .events = c.POLLOUT, .revents = 0 }};
+        poll(&fds, 1, timeout_ms);
+        if (fds[0].revents & c.POLLOUT == 0) {
+            closeSocket(s);
+            return null;
+        }
+        var so_err: c_int = 0;
+        var slen: if (windows) c_int else c.socklen_t = @sizeOf(c_int);
+        if (c.getsockopt(s, c.SOL_SOCKET, c.SO_ERROR, @ptrCast(&so_err), &slen) != 0 or so_err != 0) {
+            closeSocket(s);
+            return null;
+        }
+    }
+    return s;
+}
+
+pub fn tcpSendAll(s: Socket, data: []const u8, timeout_ms: c_int) bool {
+    var sent: usize = 0;
+    while (sent < data.len) {
+        var fds = [1]PollFd{.{ .fd = s, .events = c.POLLOUT, .revents = 0 }};
+        poll(&fds, 1, timeout_ms);
+        if (fds[0].revents & c.POLLOUT == 0) return false;
+        const rem = data[sent..];
+        const n = if (windows) c.send(s, rem.ptr, @intCast(rem.len), 0) else c.send(s, rem.ptr, rem.len, 0);
+        if (n <= 0) return false;
+        sent += @intCast(n);
+    }
+    return true;
+}
+
+pub fn tcpRecvExact(s: Socket, out: []u8, timeout_ms: c_int) bool {
+    var got: usize = 0;
+    while (got < out.len) {
+        var fds = [1]PollFd{.{ .fd = s, .events = c.POLLIN, .revents = 0 }};
+        poll(&fds, 1, timeout_ms);
+        if (fds[0].revents & c.POLLIN == 0) return false;
+        const rem = out[got..];
+        const n = if (windows) c.recv(s, rem.ptr, @intCast(rem.len), 0) else c.recv(s, rem.ptr, rem.len, 0);
+        if (n <= 0) return false;
+        got += @intCast(n);
+    }
+    return true;
 }
 
 // --- Trava de instância -----------------------------------------------------------
@@ -751,4 +813,13 @@ pub fn privateKb() u32 {
     pm.cb = @sizeOf(c.PROCESS_MEMORY_COUNTERS_EX);
     if (c.K32GetProcessMemoryInfo(c.GetCurrentProcess(), @ptrCast(&pm), pm.cb) == 0) return 0;
     return @intCast(pm.PrivateUsage / 1024);
+}
+
+/// Conjunto de trabalho (RAM física residente do processo), em KB.
+pub fn workingSetKb() u32 {
+    if (!windows) return 0;
+    var pm = std.mem.zeroes(c.PROCESS_MEMORY_COUNTERS_EX);
+    pm.cb = @sizeOf(c.PROCESS_MEMORY_COUNTERS_EX);
+    if (c.K32GetProcessMemoryInfo(c.GetCurrentProcess(), @ptrCast(&pm), pm.cb) == 0) return 0;
+    return @intCast(pm.WorkingSetSize / 1024);
 }

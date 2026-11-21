@@ -246,10 +246,12 @@ pub const Engine = struct {
     cam_synthetic: bool = false,
     cam_synthetic_frame: u64 = 0,
     cam_last_ms: i64 = 0,
-    cam_res: video_cfg.Resolution = .p1080,
+    cam_res: video_cfg.Resolution = .p720,
     cam_fps: u8 = 30,
+    cam_perf: video_cfg.PerfPreset = .balanced,
+    cam_kf_sec: u8 = 2,
     cam_dev_idx: u8 = 0,
-    cam_bitrate_kbps: std.atomic.Value(u32) = .init(4000),
+    cam_bitrate_kbps: std.atomic.Value(u32) = .init(2500),
     cam_hw: std.atomic.Value(bool) = .init(true),
     cam_preview_only: std.atomic.Value(bool) = .init(false),
     cam_tx_active_fn: ?*const fn () bool = null,
@@ -392,7 +394,7 @@ pub const Engine = struct {
         self.stopCamera();
         self.cam_dev_idx = dev_index;
         self.cam_res = res;
-        self.cam_fps = if (fps >= 45) 60 else 30;
+        self.cam_fps = if (fps >= 45) 60 else if (fps <= 20) 15 else 30;
         self.cam_denied = false;
 
         if (self.ensureCamSubsys()) {
@@ -412,7 +414,7 @@ pub const Engine = struct {
                         self.cam = opened;
                         if (spec_ptr) |sp| {
                             self.cam_fps = @intCast(std.math.clamp(specFps(sp.*), 15, 60));
-                            self.cam_res = if (sp.width >= 3840) .p2160 else if (sp.width >= 2560) .p1440 else if (sp.width >= 1920) .p1080 else .p720;
+                            self.cam_res = if (sp.width >= 3840) .p2160 else if (sp.width >= 2560) .p1440 else if (sp.width >= 1920) .p1080 else if (sp.width >= 1280) .p720 else .p480;
                         }
                         self.cam_synthetic = false;
                         self.cam_cap_stop.store(false, .release);
@@ -968,7 +970,8 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     defer if (local_buf.len > 0) nv12_pattern.freeNv12(&local_buf);
     var enc_w: u16 = 0;
     var enc_h: u16 = 0;
-    var last_br: u32 = @max(engine.cam_bitrate_kbps.load(.acquire), 1200);
+    var last_br: u32 = @max(engine.cam_bitrate_kbps.load(.acquire), 800);
+    var cam_sticky_kf: bool = true;
     var last_hw: bool = engine.cam_hw.load(.acquire);
 
     const mu = engine.cam_enc_mu orelse return 0;
@@ -989,27 +992,24 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         const need = video_cfg.nv12ByteSize(w, h);
         var copied = false;
         if (need > 0 and engine.cam_stage_buf.len >= need) {
-            if (local_buf.len != need) {
-                nv12_pattern.freeNv12(&local_buf);
-                local_buf = nv12_pattern.allocNv12(w, h) catch &.{};
-            }
-            if (local_buf.len == need) {
-                @memcpy(local_buf, engine.cam_stage_buf[0..need]);
-                copied = true;
-            }
+            // Troca de ponteiros sob o mutex: elimina cópia NV12 completa e reduz 1 buffer.
+            const tmp = local_buf;
+            local_buf = engine.cam_stage_buf;
+            engine.cam_stage_buf = tmp;
+            copied = true;
         }
         engine.cam_stage_ready = false;
         c.SDL_UnlockMutex(mu);
 
         if (!copied) continue;
         const cur_hw = engine.cam_hw.load(.acquire);
-        const cur_br = @max(engine.cam_bitrate_kbps.load(.acquire), 1200);
+        const cur_br = @max(engine.cam_bitrate_kbps.load(.acquire), 800);
         if (enc_opt != null and (enc_w != w or enc_h != h or last_hw != cur_hw)) {
             enc_opt.?.deinit();
             enc_opt = null;
         }
         if (enc_opt == null) {
-            enc_opt = capture_backend.HwEncoder.openPref(.h264, w, h, @max(engine.cam_fps, 15), cur_br, null, cur_hw) catch null;
+            enc_opt = capture_backend.HwEncoder.openConfigured(.h264, w, h, @max(engine.cam_fps, 15), cur_br, null, cur_hw, engine.cam_perf, engine.cam_kf_sec) catch null;
             enc_w = w;
             enc_h = h;
             last_br = cur_br;
@@ -1027,7 +1027,10 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
         if (cb) |tx_fn| {
             if (enc_opt) |*e| {
-                if (kcb) |kf| if (kf(ctx)) e.requestKeyframe();
+                if (kcb) |kf| if (kf(ctx)) {
+                    cam_sticky_kf = true;
+                };
+                if (cam_sticky_kf) e.requestKeyframe();
                 const y_len = @as(usize, w) * h;
                 const fr: media_if.CaptureFrame = .{
                     .width = w,
@@ -1039,10 +1042,12 @@ fn camEncThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                     .pts_us = pts_us,
                 };
                 if (e.encode(fr) catch null) |pkt| {
+                    if (pkt.is_keyframe) cam_sticky_kf = false;
                     video_diag.txEnc(e.hw, w, h);
                     tx_fn(ctx, pkt.codec, pts_us, pkt.is_keyframe, pkt.data);
                 }
                 while (e.pollOutput(pts_us)) |epkt| {
+                    if (epkt.is_keyframe) cam_sticky_kf = false;
                     video_diag.txEnc(e.hw, w, h);
                     tx_fn(ctx, epkt.codec, pts_us, epkt.is_keyframe, epkt.data);
                 }
@@ -1085,6 +1090,20 @@ fn camCapThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
 pub var stream_target_bitrate_fn: ?*const fn () u32 = null;
 
+fn openScreenMonitorWgc(target_id: u64, res: video_cfg.Resolution) ?capture_backend.ScreenSource {
+    var disps: [8]media_if.DisplayTarget = undefined;
+    const nd = capture_backend.enumerateDisplays(&disps);
+    for (disps[0..nd]) |dp| {
+        if (dp.id == target_id and dp.hmonitor != 0) {
+            return capture_backend.ScreenSource.openMonitorWgc(dp.hmonitor, res) catch null;
+        }
+    }
+    if (nd > 0 and disps[0].hmonitor != 0) {
+        return capture_backend.ScreenSource.openMonitorWgc(disps[0].hmonitor, res) catch null;
+    }
+    return null;
+}
+
 fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     const engine: *Engine = @ptrCast(@alignCast(data.?));
     sys.beginHiResTimer();
@@ -1109,6 +1128,9 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     var last_br_check_ms: i64 = 0;
     var last_frame_ms: i64 = 0;
     var has_sent_frame: bool = false;
+    var sticky_kf: bool = false;
+    var open_ms: i64 = @intCast(c.SDL_GetTicks());
+    var used_dxgi_auto: bool = false;
     var last_cursor: bool = engine.cursor_wanted.load(.acquire);
     var last_br_kbps: u32 = cfg.bitrate_kbps;
     var next_tick_ns: u64 = c.SDL_GetTicksNS();
@@ -1117,21 +1139,16 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
         if (src_opt == null) {
             if (cfg.kind == .window) {
                 src_opt = capture_backend.ScreenSource.openWindow(cfg.target_id, cfg.resolution) catch null;
+                used_dxgi_auto = false;
             } else {
-                src_opt = capture_backend.ScreenSource.openDisplay(cfg.target_id, cfg.resolution) catch blk: {
-                    var disps: [8]media_if.DisplayTarget = undefined;
-                    const nd = capture_backend.enumerateDisplays(&disps);
-                    for (disps[0..nd]) |dp| {
-                        if (dp.id == cfg.target_id and dp.hmonitor != 0) {
-                            break :blk capture_backend.ScreenSource.openMonitorWgc(dp.hmonitor, cfg.resolution) catch null;
-                        }
-                    }
-                    if (nd > 0 and disps[0].hmonitor != 0) {
-                        break :blk capture_backend.ScreenSource.openMonitorWgc(disps[0].hmonitor, cfg.resolution) catch null;
-                    }
-                    break :blk null;
+                src_opt = switch (cfg.capture_backend) {
+                    .dxgi => capture_backend.ScreenSource.openDisplay(cfg.target_id, cfg.resolution) catch null,
+                    .wgc => openScreenMonitorWgc(cfg.target_id, cfg.resolution),
+                    .auto => capture_backend.ScreenSource.openDisplay(cfg.target_id, cfg.resolution) catch openScreenMonitorWgc(cfg.target_id, cfg.resolution),
                 };
+                used_dxgi_auto = cfg.capture_backend == .auto and src_opt != null and src_opt.? == .dxgi;
             }
+            open_ms = @intCast(c.SDL_GetTicks());
             if (src_opt == null) {
                 c.SDL_Delay(200);
                 continue;
@@ -1183,15 +1200,33 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
 
         const stx_active = if (engine.stx_active_fn) |p| p() else true;
         const tx_fn_opt = if (stx_active) stx_cb else null;
-        const req_kf = if (tx_fn_opt != null) (if (skey_cb) |kf| kf(stx_ctx) else false) else false;
+        if (tx_fn_opt != null) {
+            if (skey_cb) |kf| if (kf(stx_ctx)) {
+                sticky_kf = true;
+            };
+        }
+        const req_kf = sticky_kf;
 
         var active_frame: ?media_if.CaptureFrame = got;
         var is_fresh = false;
         if (got != null) {
             is_fresh = true;
             has_sent_frame = true;
+            used_dxgi_auto = false;
             video_diag.txCap();
-        } else if (has_sent_frame and tx_fn_opt != null and (req_kf or t0 - last_frame_ms >= 250)) {
+        } else if (!has_sent_frame and used_dxgi_auto and cfg.kind == .screen and t0 - open_ms >= 350) {
+            // Tela 100% parada ao iniciar DXGI não entrega quadro #0; migra para WGC automaticamente.
+            used_dxgi_auto = false;
+            if (openScreenMonitorWgc(cfg.target_id, cfg.resolution)) |wgc_src| {
+                if (enc_opt) |*old_e| old_e.deinit();
+                enc_opt = null;
+                if (src_opt) |*old_s| old_s.deinit();
+                src_opt = wgc_src;
+                src_opt.?.setCursorCapture(last_cursor);
+                open_ms = t0;
+                continue;
+            }
+        } else if (has_sent_frame and tx_fn_opt != null and (req_kf or t0 - last_frame_ms >= cfg.static_refresh_ms)) {
             active_frame = src_opt.?.repeatNv12(cpu_needed_tx, pts_us) catch null;
         }
 
@@ -1215,7 +1250,8 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
             if (tx_fn_opt) |tx_fn| {
                 const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu) .h264 else if (cfg.codec == .auto) .h264 else cfg.codec;
                 if (enc_opt == null) {
-                    enc_opt = capture_backend.HwEncoder.openPref(eff_codec, f.width, f.height, cfg.fps, cfg.bitrate_kbps, src_opt.?.d3d11Device(), cfg.hw_accel) catch null;
+                    const enc_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu) .h264 else eff_codec;
+                    enc_opt = capture_backend.HwEncoder.openConfigured(enc_codec, f.width, f.height, cfg.fps, cfg.bitrate_kbps, src_opt.?.d3d11Device(), cfg.hw_accel, cfg.perf_preset, cfg.keyframe_sec) catch null;
                     if (enc_opt) |*e| e.requestKeyframe();
                 }
                 if (enc_opt) |*e| {
@@ -1231,10 +1267,12 @@ fn nativeThreadMain(data: ?*anyopaque) callconv(.c) c_int {
                         }
                     }
                     if (e.encode(f) catch null) |pkt| {
+                        if (pkt.is_keyframe) sticky_kf = false;
                         video_diag.txEnc(e.hw, f.width, f.height);
                         tx_fn(stx_ctx, pkt.codec, pts_us, pkt.is_keyframe, pkt.data);
                     }
                     while (e.pollOutput(pts_us)) |epkt| {
+                        if (epkt.is_keyframe) sticky_kf = false;
                         video_diag.txEnc(e.hw, f.width, f.height);
                         tx_fn(stx_ctx, epkt.codec, pts_us, epkt.is_keyframe, epkt.data);
                     }

@@ -24,7 +24,7 @@ Sozinho na call, o seu quadro fica menor, e embaixo dele o mascote cochila ao la
 
 ![Sozinho numa call](shot:f-call-sozinho)
 
-Os quadros seguem o tema: as cores, os cantos e o estilo de cartão dele (vidro no `vidro`, papel no `papel`, recorte de jornal no `editorial`…), com um toque da cor da foto de cada pessoa, e o texto troca de cor quando ficaria difícil de ler. Quem faz tema escolhe isso com `call-style` e `call-tint` no componente `messages`; veja [A tela da call](page:themes#a-tela-da-call) no guia de temas. Não tem câmera nem compartilhamento de tela.
+Os quadros seguem o tema: as cores, os cantos e o estilo de cartão dele (vidro no `vidro`, papel no `papel`, recorte de jornal no `editorial`…), com um toque da cor da foto de cada pessoa, e o texto troca de cor quando ficaria difícil de ler. Quem faz tema escolhe isso com `call-style` e `call-tint` no componente `messages`; veja [A tela da call](page:themes#a-tela-da-call) no guia de temas. No Windows, quadros de câmera ao vivo e palco Go Live (DXGI/WGC H.264 + DAVE E2EE) também aparecem direto na grade da call.
 
 ## Volume por pessoa
 
@@ -83,7 +83,7 @@ Alguns detalhes que deram trabalho para acertar:
 
 - No Linux, o aperte para falar só funciona com a janela em foco, porque o SDL não tem atalho global portável. No Windows, funciona de qualquer janela.
 - A supressão de ruído cuida de ruído constante. Teclado e pancadas podem passar, e outras vozes continuam.
-- Sem compartilhamento de tela, câmera nem transmissão.
+- Compartilhamento de tela e captura de câmera funcionam hoje no Windows (DXGI/WGC + Media Foundation H.264 + DAVE E2EE); no Linux ainda são stubs.
 - Sem teste automático para uma call de verdade. O QA cobre a interface e as configurações, com um dispositivo de áudio falso.
 
 ## Depuração

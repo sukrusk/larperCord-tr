@@ -84,6 +84,7 @@ pub fn form(p: anytype, where: Where) void {
     const ctx = p.ctx;
     const s = &ctx.st.settings;
     p.note(i18n.tr("Proxy HTTP, HTTPS, SOCKS5 ou SOCKS5h, com login e senha se ele pedir. Tor: SOCKS5h, 127.0.0.1, porta 9050. Colar a URL inteira no endereço preenche todos os campos.", "HTTP, HTTPS, SOCKS5 or SOCKS5h proxy, with a login and password if it asks for one. Tor: SOCKS5h, 127.0.0.1, port 9050. Pasting the full URL into the address fills in every field."));
+    p.note(i18n.tr("Proxies SOCKS5 também tunelam UDP de voz/vídeo (UDP ASSOCIATE) quando o servidor suporta.", "SOCKS5 proxies also tunnel voice/video UDP (UDP ASSOCIATE) when supported by the server."));
     if (where == .login) p.note(i18n.tr("Aqui o proxy vale para tudo, inclusive para entrar no Discord. Depois dá para mudar em Configurações → Rede.", "Here the proxy is used for everything, including signing in to Discord. You can change it later in Settings → Network."));
     if (!std.mem.eql(u8, proxy_seen.slice(), s.proxy.slice())) {
         proxy_seen = s.proxy;

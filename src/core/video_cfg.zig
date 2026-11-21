@@ -7,9 +7,11 @@ pub const Resolution = enum(u8) {
     p1080 = 1,
     p1440 = 2,
     p2160 = 3,
+    p480 = 4,
 
     pub fn dims(r: Resolution) [2]u32 {
         return switch (r) {
+            .p480 => .{ 854, 480 },
             .p720 => .{ 1280, 720 },
             .p1080 => .{ 1920, 1080 },
             .p1440 => .{ 2560, 1440 },
@@ -19,6 +21,7 @@ pub const Resolution = enum(u8) {
 
     pub fn label(r: Resolution) []const u8 {
         return switch (r) {
+            .p480 => "480p",
             .p720 => "720p",
             .p1080 => "1080p",
             .p1440 => "1440p",
@@ -29,6 +32,7 @@ pub const Resolution = enum(u8) {
     pub fn defaultBitrateKbps(r: Resolution, fps: u8) u32 {
         const hi = fps >= 50;
         return switch (r) {
+            .p480 => if (hi) 1800 else 1000,
             .p720 => if (hi) 3500 else 2200,
             .p1080 => if (hi) 6500 else 4000,
             .p1440 => if (hi) 8500 else 6000,
@@ -108,6 +112,59 @@ pub const RemotePerm = enum(u8) {
     full = 2,
 };
 
+pub const PerfPreset = enum(u8) {
+    speed = 0,
+    balanced = 1,
+    quality = 2,
+
+    pub fn fromByte(b: u8) PerfPreset {
+        return std.enums.fromInt(PerfPreset, b) orelse .balanced;
+    }
+
+    pub fn qualityVsSpeed(p: PerfPreset) u32 {
+        return switch (p) {
+            .speed => 15,
+            .balanced => 55,
+            .quality => 85,
+        };
+    }
+};
+
+pub const CaptureBackend = enum(u8) {
+    auto = 0,
+    dxgi = 1,
+    wgc = 2,
+
+    pub fn fromByte(b: u8) CaptureBackend {
+        return std.enums.fromInt(CaptureBackend, b) orelse .auto;
+    }
+};
+
+pub fn camResolution(idx: u8, stream_res: Resolution) Resolution {
+    return switch (idx) {
+        0 => .p480,
+        1 => .p720,
+        2 => .p1080,
+        else => stream_res,
+    };
+}
+
+pub fn camFpsValue(idx: u8) u8 {
+    return switch (idx) {
+        0 => 15,
+        2 => 60,
+        else => 30,
+    };
+}
+
+pub fn staticRefreshMs(idx: u8) i64 {
+    return switch (idx) {
+        0 => 500, // 2 fps
+        2 => 100, // 10 fps
+        else => 250, // 4 fps
+    };
+}
+
 pub const StreamConfig = struct {
     kind: SourceKind = .screen,
     /// DisplayID, HWND/window handle ou CameraID.
@@ -122,6 +179,10 @@ pub const StreamConfig = struct {
     remote_perm: RemotePerm = .off,
     transport: TransportMode = .discord_sfu,
     hw_accel: bool = true,
+    perf_preset: PerfPreset = .balanced,
+    capture_backend: CaptureBackend = .auto,
+    static_refresh_ms: i64 = 250,
+    keyframe_sec: u8 = 2,
 };
 
 pub const StreamMetrics = struct {

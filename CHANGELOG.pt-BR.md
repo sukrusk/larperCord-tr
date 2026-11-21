@@ -1,5 +1,18 @@
 # O que mudou em cada versão
 
+## 0.8.0
+
+**RAM Mínima e Limpeza**
+- Implementada compactação real de heaps (`GetProcessHeaps` + `HeapCompact`) e recorte de working set (`SetProcessWorkingSetSize`) no Windows em `mem_tune.zig`, devolvendo memória residual de Media Foundation/NVENC/COM ao encerrar transmissão, câmera, busca ou call.
+- Corrigida a retenção de decodificadores (`removeVideoUser` agora acorda `decThreadMain` com fila multiusuário e compacta heaps), reduzido o pool WGC de `3` para `2` superfícies, ajustado `HwEncoder.out_buf` proporcionalmente à resolução (`512 KiB` até 720p, `1 MiB` até 1080p, `2 MiB` 4K), reduzidos buffers UDP em call só de áudio (`512 KiB` vs `2 MiB` no vídeo) e eliminada a cópia NV12 da câmera por troca de ponteiros sob mutex.
+- Adicionados **Modo RAM mínima**, leitura ao vivo de **RAM física (Working Set)**, limites ampliados (`8..128 MB` imagens, `2..32 MB` GIFs, `300..5000` mensagens), botão **Otimizar RAM agora** em Configurações → Desempenho e descarregamento automático do índice de busca ocioso mesmo com a janela aberta.
+
+**Tela, Câmera e Discord**
+- Adicionados controles próprios para a câmera (`480p`/`720p`/`1080p`/Igual à tela, `15`/`30`/`60 FPS`, bitrate próprio), evitando forçar webcam em 4K quando o compartilhamento está em 4K.
+- Adicionados em Configurações → Voz e Vídeo: perfil do encoder (`Velocidade` / `Equilibrado` / `Qualidade`), motor de captura (`Auto` / `DXGI` / `WGC`), taxa em tela parada (`2` / `4` / `10` FPS), intervalo de keyframe (`1s` / `2s` / `4s`) e telemetria de RAM do processo no HUD do palco.
+- Alinhada toda a negociação Discord SFU (câmera e Go Live) em `H.264` entre `OP 1`, `OP 4` (`video_codec`), `OP 12`, DAVE E2EE e RTP TX para visibilidade garantida no cliente oficial do Discord; pedidos PLI/FIR agora permanecem ativos até sair um quadro IDR real; fallback automático de DXGI para WGC em tela 100% parada no quadro #0; avisos para motivos de encerramento `STREAM_DELETE`; e túnel UDP SOCKS5 `UDP ASSOCIATE` (RFC 1928/1929) para voz e vídeo.
+- Corrigido o mascote do canto sobrepondo o botão vermelho da tela da call (`QA_SUITE=call`) e atualizados READMEs/guias antigos.
+
 ## 0.7.0
 
 **Rede, DoH e GoodbyeDPI**

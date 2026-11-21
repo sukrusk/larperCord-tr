@@ -341,20 +341,44 @@ pub const HwEncoder = struct {
     }
 
     pub fn openPref(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_preferred: bool) !HwEncoder {
+        return openConfigured(codec, w, h, fps, bitrate_kbps, d3d11_dev, hw_preferred, .balanced, 2);
+    }
+
+    pub fn openConfigured(
+        codec: video_cfg.Codec,
+        w: u16,
+        h: u16,
+        fps: u8,
+        bitrate_kbps: u32,
+        d3d11_dev: ?*anyopaque,
+        hw_preferred: bool,
+        perf: video_cfg.PerfPreset,
+        keyframe_sec: u8,
+    ) !HwEncoder {
         if (!hw_preferred) {
-            if (openImpl(codec, w, h, fps, bitrate_kbps, null, false)) |sw_enc| {
+            if (openImpl(codec, w, h, fps, bitrate_kbps, null, false, perf, keyframe_sec)) |sw_enc| {
                 return sw_enc;
             } else |_| {}
         }
-        if (openImpl(codec, w, h, fps, bitrate_kbps, d3d11_dev, true)) |hw_enc| {
+        if (openImpl(codec, w, h, fps, bitrate_kbps, d3d11_dev, true, perf, keyframe_sec)) |hw_enc| {
             return hw_enc;
         } else |err| {
             // Se o encoder hardware falhar (ou com D3D11), cai para MFT em software CPU/NV12.
-            return openImpl(codec, w, h, fps, bitrate_kbps, null, false) catch return err;
+            return openImpl(codec, w, h, fps, bitrate_kbps, null, false, perf, keyframe_sec) catch return err;
         }
     }
 
-    fn openImpl(codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32, d3d11_dev: ?*anyopaque, hw_only: bool) !HwEncoder {
+    fn openImpl(
+        codec: video_cfg.Codec,
+        w: u16,
+        h: u16,
+        fps: u8,
+        bitrate_kbps: u32,
+        d3d11_dev: ?*anyopaque,
+        hw_only: bool,
+        perf: video_cfg.PerfPreset,
+        keyframe_sec: u8,
+    ) !HwEncoder {
         const eff_codec: video_cfg.Codec = if (codec == .auto) .h264 else codec;
         var api = try MfApi.open();
         errdefer api.close();
@@ -413,16 +437,22 @@ pub const HwEncoder = struct {
             const set_val = com.slot(capi, 9, *const fn (*anyopaque, *const GUID, *const com.VARIANT) callconv(.winapi) HRESULT);
             const ll = com.VARIANT.fromBool(true);
             _ = set_val(capi, &com.CODECAPI_AVLowLatencyMode, &ll);
-            const cbr = com.VARIANT.fromU32(0); // eAVEncCommonRateControlMode_CBR = 0
+            // CBR (0) dá banda previsível no WebRTC; Quality usa PeakConstrainedVBR (1) para nitidez em texto.
+            const rc_mode: UINT = if (perf == .quality) 1 else 0;
+            const cbr = com.VARIANT.fromU32(rc_mode);
             _ = set_val(capi, &com.CODECAPI_AVEncCommonRateControlMode, &cbr);
             const br = com.VARIANT.fromU32(self.bitrate_kbps * 1000);
             _ = set_val(capi, &com.CODECAPI_AVEncCommonMeanBitRate, &br);
-            const max_br = com.VARIANT.fromU32(self.bitrate_kbps * 1250);
+            const max_mult: u32 = if (perf == .quality) 1500 else 1250;
+            const max_br = com.VARIANT.fromU32(self.bitrate_kbps * max_mult);
             _ = set_val(capi, &com.CODECAPI_AVEncCommonMaxBitRate, &max_br);
-            // WebRTC / Discord exige GOP curto (2s) sem B-frames para recuperar perdas sem travar.
+            const qvs = com.VARIANT.fromU32(perf.qualityVsSpeed());
+            _ = set_val(capi, &com.CODECAPI_AVEncCommonQualityVsSpeed, &qvs);
+            // WebRTC / Discord exige GOP curto (1s..4s) sem B-frames para recuperar perdas sem travar.
             const zero_b = com.VARIANT.fromU32(0);
             _ = set_val(capi, &com.CODECAPI_AVEncMPVDefaultBPictureCount, &zero_b);
-            const gop = com.VARIANT.fromU32(@as(UINT, @max(fps, 1)) * 2);
+            const kf_s: UINT = @intCast(std.math.clamp(keyframe_sec, 1, 4));
+            const gop = com.VARIANT.fromU32(@as(UINT, @max(fps, 1)) * kf_s);
             _ = set_val(capi, &com.CODECAPI_AVEncMPVGOPSize, &gop);
         }
 
@@ -446,7 +476,9 @@ pub const HwEncoder = struct {
             self.out_sample = os;
         }
 
-        self.out_buf = try std.heap.page_allocator.alloc(u8, 2 * 1024 * 1024);
+        const pixels = @as(u32, self.w) * @as(u32, self.h);
+        const out_cap: usize = if (pixels <= 1280 * 720) 512 * 1024 else if (pixels <= 1920 * 1080) 1024 * 1024 else 2 * 1024 * 1024;
+        self.out_buf = try std.heap.page_allocator.alloc(u8, out_cap);
 
         const proc_msg = com.slot(self.mft.?, 23, *const fn (*anyopaque, UINT, usize) callconv(.winapi) HRESULT);
         _ = proc_msg(self.mft.?, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);

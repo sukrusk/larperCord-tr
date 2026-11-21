@@ -32,7 +32,7 @@ larperCord is a young project: version 0.6.5, with its first commit on November 
 | First run | partial | Sign-in screen and demo mode, no introduction to the app |
 | Platforms | partial | Linux and Windows. The Linux build needs glibc 2.34 or newer. It's used daily on Arch with Hyprland, and opened in Ubuntu, Debian, Fedora, openSUSE and Arch containers, in demo mode, before each release. The Windows build has only been run in CI and in a sandbox, in demo mode |
 | Joining a server by invite | **works** | From an invite card, a link or a code, with a warning first. Servers with rules or onboarding open them in the app |
-| Screen sharing and camera | missing | |
+| Screen sharing and camera | partial | Windows DXGI/WGC screen sharing up to 4K 60fps with WASAPI process loopback audio Isolation and physical/synthetic cameras in H.264 + DAVE E2EE for official Discord clients. Linux capture is planned |
 
 ## Roadmap
 

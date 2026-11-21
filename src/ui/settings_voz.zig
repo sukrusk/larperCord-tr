@@ -45,6 +45,55 @@ pub fn stopPreviewIfClosed(open: bool, is_voz_page: bool, in_call_cam: bool) voi
     }
 }
 
+fn camBitrateToIdx(mbps: u8) u8 {
+    return switch (mbps) {
+        0 => 0,
+        1...2 => 1,
+        3...4 => 2,
+        5...7 => 3,
+        else => 4,
+    };
+}
+
+fn idxToCamMbps(idx: u8) u8 {
+    return switch (idx) {
+        0 => 0,
+        1 => 2,
+        2 => 4,
+        3 => 6,
+        else => 10,
+    };
+}
+
+fn kfSecToIdx(sec: u8) u8 {
+    return switch (sec) {
+        1 => 0,
+        4 => 2,
+        else => 1,
+    };
+}
+
+fn idxToKfSec(idx: u8) u8 {
+    return switch (idx) {
+        0 => 1,
+        2 => 4,
+        else => 2,
+    };
+}
+
+fn startConfiguredCamTest(s: *const @import("settings_state.zig").Settings) bool {
+    const tr_res = video_cfg.camResolution(s.video_cam_res, video_cfg.Resolution.fromByte(s.video_res));
+    const tr_fps = video_cfg.camFpsValue(s.video_cam_fps);
+    const cam_kbps: u32 = if (s.video_cam_bitrate_mbps > 0)
+        std.math.clamp(@as(u32, s.video_cam_bitrate_mbps) * 1000, 800, 15_000)
+    else
+        tr_res.defaultBitrateKbps(tr_fps);
+    live_video.eng.cam_perf = video_cfg.PerfPreset.fromByte(s.video_perf_preset);
+    live_video.eng.cam_kf_sec = s.video_kf_sec;
+    live_video.eng.configureCamera(cam_kbps, s.video_hw, true);
+    return live_video.eng.startCamera(s.video_cam_idx, tr_res, tr_fps, true);
+}
+
 fn bitrateToIdx(mbps: u8) u8 {
     return switch (mbps) {
         0 => 0,
@@ -130,6 +179,24 @@ pub fn draw(p: anytype) void {
         i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
         &s.video_hw,
     );
+    p.segmented(&.{ i18n.tr("Velocidade", "Speed"), i18n.tr("Equilibrado", "Balanced"), i18n.tr("Qualidade", "Quality") }, &s.video_perf_preset);
+    p.segmented(&.{ "Auto", "DXGI", "WGC" }, &s.video_cap_mode);
+    var kf_idx = kfSecToIdx(s.video_kf_sec);
+    const prev_kf_idx = kf_idx;
+    p.segmented(&.{ "Keyframe 1s", "Keyframe 2s", "Keyframe 4s" }, &kf_idx);
+    if (kf_idx != prev_kf_idx) s.video_kf_sec = idxToKfSec(kf_idx);
+    p.segmented(&.{ "2 FPS (Eco)", "4 FPS", "10 FPS" }, &s.video_static_fps);
+    p.note(i18n.tr(
+        "No Discord SFU o app negocia H.264 + DAVE + OP 12 para aparecer no cliente oficial do Discord; WGC evita congelamento em tela parada. HEVC/AV1 valem para P2P direto.",
+        "On Discord SFU, the app negotiates H.264 + DAVE + OP 12 so streams appear in the official Discord client; WGC prevents static-screen stalls. HEVC/AV1 apply to direct P2P.",
+    ));
+    p.heading(i18n.tr("Câmera (Desempenho & RAM)", "Camera (Performance & RAM)"));
+    p.segmented(&.{ "480p", "720p", "1080p", i18n.tr("Igual à tela", "Match stream") }, &s.video_cam_res);
+    p.segmented(&.{ "15 FPS", "30 FPS", "60 FPS" }, &s.video_cam_fps);
+    var cbr_idx = camBitrateToIdx(s.video_cam_bitrate_mbps);
+    const prev_cbr_idx = cbr_idx;
+    p.segmented(&.{ "Auto", "2 Mbps", "4 Mbps", "6 Mbps", "10 Mbps" }, &cbr_idx);
+    if (cbr_idx != prev_cbr_idx) s.video_cam_bitrate_mbps = idxToCamMbps(cbr_idx);
     p.toggle(
         i18n.tr("Kamera ön izlemesini aynala", "Mirror camera self-preview"),
         i18n.tr("Yalnızca kendi ekranındaki kamera ön izlemesini yatay çevirir.", "Horizontally flips your own camera preview locally."),
@@ -163,11 +230,7 @@ pub fn draw(p: anytype) void {
                 cam_test_on = false;
                 live_video.eng.stopCamera();
             } else {
-                const tr_res = video_cfg.Resolution.fromByte(s.video_res);
-                const tr_fps: u8 = if (s.video_fps == 1) 60 else 30;
-                const cam_kbps: u32 = if (s.video_bitrate_mbps > 0) std.math.clamp(@as(u32, s.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
-                live_video.eng.configureCamera(cam_kbps, s.video_hw, true);
-                if (live_video.eng.startCamera(s.video_cam_idx, tr_res, tr_fps, true)) {
+                if (startConfiguredCamTest(s)) {
                     cam_test_on = true;
                 } else {
                     ctx.st.showToast(ctx.now_ms, true, "nenhuma câmera aberta (verifique a permissão)", "no camera opened (check permission)", .{});
@@ -191,9 +254,7 @@ pub fn draw(p: anytype) void {
                 if (ctx.st.cam_on) {
                     ctx.act(.{ .switch_camera = s.video_cam_idx });
                 } else if (cam_test_on) {
-                    const tr_res = video_cfg.Resolution.fromByte(s.video_res);
-                    const tr_fps: u8 = if (s.video_fps == 1) 60 else 30;
-                    _ = live_video.eng.startCamera(s.video_cam_idx, tr_res, tr_fps, true);
+                    _ = startConfiguredCamTest(s);
                 }
             }
             p.y += 40;

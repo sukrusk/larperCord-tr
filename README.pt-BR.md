@@ -281,7 +281,7 @@ Remove-Item Env:LARPER_TOKEN
 A variável só vale quando o app abre: se o larperCord já estiver aberto, mesmo só na bandeja,
 encerre antes (**Sair** no menu do ícone da bandeja).
 
-`--demo` força o modo demonstração mesmo com token. Ainda não tem: compartilhar tela e câmera. Canais
+`--demo` força o modo demonstração mesmo com token. Compartilhamento de tela (DXGI/WGC até 4K 60fps, áudio isolado por processo no Windows) e câmera funcionam no Windows em H.264 + DAVE E2EE com o cliente oficial (Linux ainda planejado). Canais
 sem acesso só mostram um aviso. As notificações passam pelo `notify-send` no Linux (do libnotify) e
 pela bandeja no Windows, e clicar numa delas ainda não abre o canal. A voz usa o backend de áudio do
 sistema via SDL3 e só sobe a thread quando você entra numa call.

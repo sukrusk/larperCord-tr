@@ -280,6 +280,9 @@ pub const App = struct {
     /// Muita memória acabou de ser solta (READY, rajada de imagens): o tique
     /// do relógio devolve ao sistema.
     trim_wanted: std.atomic.Value(bool) = .init(false),
+    compact_wanted: std.atomic.Value(bool) = .init(false),
+    force_trim_wanted: std.atomic.Value(bool) = .init(false),
+    last_search_closed_ms: i64 = 0,
     /// O tique do relógio acordou só porque o minuto virou (sem RAM nova para
     /// mostrar): se um quadro já saiu neste minuto, não precisa de outro.
     minute_tick: std.atomic.Value(bool) = .init(false),
@@ -1120,7 +1123,16 @@ pub const App = struct {
         // Aqui, e não na thread da UI: varrer as arenas leva milissegundos. Em
         // call fica para depois: durante a varredura, quem pede memória espera,
         // e a voz não pode esperar. O pedido continua valendo até a call acabar.
-        if (!voz_audio.in_call.load(.acquire) and app.trim_wanted.swap(false, .acq_rel)) mem_tune.trim();
+        if (app.force_trim_wanted.swap(false, .acq_rel)) {
+            _ = app.trim_wanted.swap(false, .acq_rel);
+            _ = app.compact_wanted.swap(false, .acq_rel);
+            mem_tune.trim();
+        } else if (!voz_audio.in_call.load(.acquire) and app.trim_wanted.swap(false, .acq_rel)) {
+            _ = app.compact_wanted.swap(false, .acq_rel);
+            mem_tune.trim();
+        } else if (app.compact_wanted.swap(false, .acq_rel)) {
+            mem_tune.compact();
+        }
         // O número da RAM: só se está na tela. Varrer o mapa de memória do
         // processo leva milissegundos, e o tique roda mesmo com tudo parado.
         const ram_seen = @atomicRmw(bool, &app.stats.ram_seen, .Xchg, false, .monotonic);
@@ -1226,9 +1238,16 @@ pub const App = struct {
     fn openConfiguredCamera(app: *App) void {
         const st = &app.st;
         const s = &st.settings;
-        const res = video_cfg.Resolution.fromByte(s.video_res);
-        const fps: u8 = if (s.video_fps == 1) 60 else 30;
-        const cam_kbps: u32 = if (s.video_bitrate_mbps > 0) std.math.clamp(@as(u32, s.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
+        const stream_res = video_cfg.Resolution.fromByte(s.video_res);
+        const res = video_cfg.camResolution(s.video_cam_res, stream_res);
+        const fps: u8 = video_cfg.camFpsValue(s.video_cam_fps);
+        const auto_kbps = res.defaultBitrateKbps(fps);
+        const cam_kbps: u32 = if (s.video_cam_bitrate_mbps > 0)
+            std.math.clamp(@as(u32, s.video_cam_bitrate_mbps) * 1000, 800, 15_000)
+        else
+            auto_kbps;
+        live_video.eng.cam_perf = video_cfg.PerfPreset.fromByte(s.video_perf_preset);
+        live_video.eng.cam_kf_sec = s.video_kf_sec;
         live_video.eng.configureCamera(cam_kbps, s.video_hw, false);
         const ok = live_video.eng.startCamera(s.video_cam_idx, res, fps, app.store.demo);
         if (ok) {
@@ -1237,9 +1256,11 @@ pub const App = struct {
                 .kind = .camera,
                 .resolution = if (live_video.eng.cam_synthetic) res else live_video.eng.cam_res,
                 .fps = live_video.eng.cam_fps,
-                .codec = video_cfg.Codec.fromByte(s.video_codec),
+                .codec = .h264,
                 .bitrate_kbps = cam_kbps,
                 .hw_accel = s.video_hw,
+                .perf_preset = live_video.eng.cam_perf,
+                .keyframe_sec = s.video_kf_sec,
             } });
         } else {
             st.cam_on = false;
@@ -2344,6 +2365,8 @@ pub const App = struct {
                     if (st.spotlight_cam == app.store.me) st.spotlight_cam = 0;
                     live_video.eng.stopCamera();
                     app.cmd(.stop_video);
+                    app.compact_wanted.store(true, .release);
+                    app.trim_wanted.store(true, .release);
                 } else {
                     app.openConfiguredCamera();
                 }
@@ -2386,6 +2409,8 @@ pub const App = struct {
                     live_video.eng.stopWatch();
                 }
                 app.cmd(.stop_stream);
+                app.compact_wanted.store(true, .release);
+                app.trim_wanted.store(true, .release);
             },
             .watch_stream => |owner| {
                 const ch = st.voice orelse return;
@@ -2606,6 +2631,13 @@ pub const App = struct {
                 app.saveSettings();
             },
             .save_settings => app.saveSettings(),
+            .trim_memory => {
+                @import("ui/images.zig").recentClear();
+                _ = app.images.releaseHidden();
+                _ = @import("ui/search.zig").releaseIdle(true);
+                app.force_trim_wanted.store(true, .release);
+                st.showToast(now(), false, "Memória otimizada.", "Memory trimmed.", .{});
+            },
             .pick_files => app.pickFiles(),
             // No QA nada abre: ui/exportar.zig responde com o caminho que o teste pôs.
             .save_dialog => @import("ui/exportar.zig").showDialog(app.win.window, app.opts.qa),
@@ -3857,9 +3889,13 @@ pub const App = struct {
             d.text_scale = std.math.clamp(set.font_scale, 0.5, 3);
             const text_weight = @round(std.math.clamp(set.text_weight, 1, 1.6) * 20) / 20;
             if (text_weight != app.fonts.text_weight or set.text_hinting != app.fonts.text_mode) app.fonts.setStyle(text_weight, set.text_hinting);
-            app.images.budget_bytes = @as(usize, @intFromFloat(std.math.clamp(set.image_cache_mb, 16, 128))) * 1024 * 1024;
-            @import("ui/images.zig").gif_limit_bytes.store(@as(usize, @intFromFloat(std.math.clamp(set.gif_limit_mb, 4, 32))) * 1024 * 1024, .monotonic);
-            app.store.message_budget = @intFromFloat(std.math.clamp(set.message_budget, 500, 5000));
+            const img_mb = std.math.clamp(set.image_cache_mb, 8, 128);
+            const gif_mb = std.math.clamp(set.gif_limit_mb, 2, 32);
+            const msg_bud = std.math.clamp(set.message_budget, 300, 5000);
+            app.images.budget_bytes = @as(usize, @intFromFloat(if (set.low_ram_mode) @min(img_mb, 16) else img_mb)) * 1024 * 1024;
+            @import("ui/images.zig").low_ram_mode.store(set.low_ram_mode, .monotonic);
+            @import("ui/images.zig").gif_limit_bytes.store(@as(usize, @intFromFloat(if (set.low_ram_mode) @min(gif_mb, 8) else gif_mb)) * 1024 * 1024, .monotonic);
+            app.store.message_budget = @intFromFloat(if (set.low_ram_mode) @min(msg_bud, 1000) else msg_bud);
             if (debug_log.ui_on != debug_log.isOn()) {
                 debug_log.set(debug_log.ui_on);
                 store_mod.read_debug = debug_log.isOn() or c.SDL_getenv("LARPER_READ_DEBUG") != null;
@@ -3876,8 +3912,32 @@ pub const App = struct {
             @import("net/media_url.zig").allow_gif_hosts.store(set.gif_hosts, .release);
             dpi_bypass.setConfig(set.dpi_doh, set.dpi_split);
             voice_mod.hw_decode_pref.store(set.video_hw, .release);
-            const cam_kbps: u32 = if (set.video_bitrate_mbps > 0) std.math.clamp(@as(u32, set.video_bitrate_mbps) * 1000, 1500, 15_000) else 4500;
+            const cam_res = video_cfg.camResolution(set.video_cam_res, video_cfg.Resolution.fromByte(set.video_res));
+            const cam_fps = video_cfg.camFpsValue(set.video_cam_fps);
+            const cam_kbps: u32 = if (set.video_cam_bitrate_mbps > 0)
+                std.math.clamp(@as(u32, set.video_cam_bitrate_mbps) * 1000, 800, 15_000)
+            else
+                cam_res.defaultBitrateKbps(cam_fps);
+            live_video.eng.cam_perf = video_cfg.PerfPreset.fromByte(set.video_perf_preset);
+            live_video.eng.cam_kf_sec = set.video_kf_sec;
             live_video.eng.configureCamera(cam_kbps, set.video_hw, !app.st.cam_on);
+            if (!app.opts.qa and app.store.ready) {
+                const search_ui = @import("ui/search.zig");
+                if (search_ui.open) {
+                    app.last_search_closed_ms = now_ms;
+                } else if (app.last_search_closed_ms == 0) {
+                    app.last_search_closed_ms = now_ms;
+                } else {
+                    const search_idle_ms: i64 = if (set.low_ram_mode) 15_000 else 45_000;
+                    if (now_ms - app.last_search_closed_ms >= search_idle_ms) {
+                        if (search_ui.releaseIdle(true)) {
+                            app.compact_wanted.store(true, .release);
+                            app.trim_wanted.store(true, .release);
+                        }
+                        app.last_search_closed_ms = now_ms;
+                    }
+                }
+            }
             proxy.set(set.proxy.slice(), set.proxy_all);
             // Proxy novo (o da tela de entrada): o erro de rede era da tentativa sem ele.
             if (proxy.generation() != app.proxy_gen) {

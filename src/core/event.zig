@@ -597,6 +597,8 @@ pub const Action = union(enum) {
     toggle_fullscreen,
     /// Grava as configurações (uma mudança que não passa pela tela delas).
     save_settings,
+    /// Compacta caches/heaps e devolve RAM ao sistema agora.
+    trim_memory,
     reply: Id,
     edit_message: Id,
     save_edit: []const u8,

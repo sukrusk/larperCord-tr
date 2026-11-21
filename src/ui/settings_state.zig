@@ -338,6 +338,22 @@ pub const Settings = struct {
     video_cam_mirror: bool = true,
     video_cursor: bool = true,
     video_self_preview: bool = true,
+    /// Modo RAM mínima: reduz caches ociosos (imagens/GIF/busca) e compacta heaps mais rápido.
+    low_ram_mode: bool = false,
+    /// Desempenho de captura/encoder: 0=Velocidade, 1=Equilibrado, 2=Qualidade.
+    video_perf_preset: u8 = 1,
+    /// Motor de captura da tela: 0=Auto (DXGI->WGC), 1=DXGI, 2=WGC.
+    video_cap_mode: u8 = 0,
+    /// Reenvio em tela parada (keepalive WebRTC/Discord): 0=2fps, 1=4fps, 2=10fps.
+    video_static_fps: u8 = 1,
+    /// Intervalo de keyframe (GOP) em segundos (1, 2, 4).
+    video_kf_sec: u8 = 2,
+    /// Resolução própria da câmera: 0=480p, 1=720p, 2=1080p, 3=Igual à transmissão.
+    video_cam_res: u8 = 1,
+    /// FPS da câmera: 0=15fps, 1=30fps, 2=60fps.
+    video_cam_fps: u8 = 1,
+    /// Taxa da câmera em Mbps (0=Auto, 1..15).
+    video_cam_bitrate_mbps: u8 = 0,
     /// DNS-over-HTTPS no app (0=Desligado, 1=Cloudflare 1.1.1.1, 2=Google 8.8.8.8).
     dpi_doh: u8 = 1,
     /// Divisão TLS SNI sem driver (0=Desligado, 1=Akıllı/Smart TCP, 2=Sert Record+TCP).
@@ -701,6 +717,14 @@ test "DPI, câmara aynalama e codec de vídeo vão e voltam pelo KDL" {
     s.video_cam_mirror = false;
     s.video_cursor = false;
     s.video_self_preview = false;
+    s.low_ram_mode = true;
+    s.video_perf_preset = 2;
+    s.video_cap_mode = 2;
+    s.video_static_fps = 2;
+    s.video_kf_sec = 1;
+    s.video_cam_res = 0;
+    s.video_cam_fps = 0;
+    s.video_cam_bitrate_mbps = 3;
     s.dpi_doh = 2;
     s.dpi_split = 2;
     s.goodbyedpi_preset = 1;
@@ -715,6 +739,14 @@ test "DPI, câmara aynalama e codec de vídeo vão e voltam pelo KDL" {
     try std.testing.expect(!back.video_cam_mirror);
     try std.testing.expect(!back.video_cursor);
     try std.testing.expect(!back.video_self_preview);
+    try std.testing.expect(back.low_ram_mode);
+    try std.testing.expectEqual(@as(u8, 2), back.video_perf_preset);
+    try std.testing.expectEqual(@as(u8, 2), back.video_cap_mode);
+    try std.testing.expectEqual(@as(u8, 2), back.video_static_fps);
+    try std.testing.expectEqual(@as(u8, 1), back.video_kf_sec);
+    try std.testing.expectEqual(@as(u8, 0), back.video_cam_res);
+    try std.testing.expectEqual(@as(u8, 0), back.video_cam_fps);
+    try std.testing.expectEqual(@as(u8, 3), back.video_cam_bitrate_mbps);
     try std.testing.expectEqual(@as(u8, 2), back.dpi_doh);
     try std.testing.expectEqual(@as(u8, 2), back.dpi_split);
     try std.testing.expectEqual(@as(u8, 1), back.goodbyedpi_preset);

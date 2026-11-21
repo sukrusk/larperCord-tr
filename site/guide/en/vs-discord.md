@@ -74,7 +74,7 @@ Some items here are how larperCord stays light, and the official app may do simi
 
 ## What the official app has that larperCord doesn't
 
-- **[Screen sharing (sending or watching), camera and video calls](page:voice#limits-today).** larperCord does voice only, and these aren't planned.
+- **[Linux screen sharing and camera](page:voice#limits-today).** On Windows, camera, Go Live screen sharing (up to 4K 60fps with process-isolated audio) and H.264 + DAVE E2EE compatibility with official Discord clients work today; Linux screen/camera capture is not implemented yet.
 - **[Push-to-talk outside the window, on Linux](page:voice#limits-today).** On Linux it only works while the window is focused, because SDL has no portable global shortcut. A global one is on the roadmap. On Windows it works from any window.
 - **[Notifications that open the conversation](page:status#what-works-today).** Clicking one doesn't open the channel yet.
 - **[Server and role settings](page:features#servers-and-groups).** Here you can edit a server's name, description, icon and banner, give or remove roles, and kick, ban, time out, or server-mute and deafen members. The rest is on the roadmap.

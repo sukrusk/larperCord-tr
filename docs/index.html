@@ -45,7 +45,7 @@
   <canvas class="pixels" aria-hidden="true"></canvas>
   <div class="hero-first">
     <div class="hero-text">
-      <span class="tag"><b>layout</b> <i>{ row {</i> &nbsp;// unofficial native Discord client · v0.7.0</span>
+      <span class="tag"><b>layout</b> <i>{ row {</i> &nbsp;// unofficial native Discord client · v0.8.0</span>
       <h1><span data-g="Discord,">Discord,</span><em data-g="without the browser">without the browser</em><span data-g="inside.">inside.</span></h1>
       <p class="typed" aria-hidden="true"><span class="typed-cmd"></span><span class="typed-out"></span><i class="typed-cur"></i></p>
       <div class="hero-copy">
@@ -284,7 +284,7 @@
       <li><strong>A call screen in the theme's style.</strong> One tile per person, with the picture and nickname they use in that server, what they're playing and who's streaming. Alone in a call, the mascot naps next to an invite button.</li>
       <li><strong>No call, no cost.</strong> The voice thread is only created when you join. Before that, audio only starts if you open the voice settings.</li>
       <li><strong>Your mic, your rules.</strong> Pick your devices, even mid-call. Voice activity with an automatic threshold or push-to-talk, a high-pass filter, a noise gate and RNNoise noise suppression, a live meter and a mic test.</li>
-      <li><strong>Honest limits.</strong> On Linux, push-to-talk only works while the window is focused (on Windows it works from any window). No screen sharing or camera. <a href="guide/voice.html">Voice guide →</a></li>
+      <li><strong>Honest limits.</strong> On Linux, push-to-talk only works while the window is focused, and screen sharing/camera capture is currently Windows-only (Linux capture is planned). <a href="guide/voice.html">Voice guide →</a></li>
     </ul>
   </div>
   <span class="close">}</span>
@@ -377,7 +377,7 @@
       <tr><th>Notifications</th><td><span class="chip part">partial</span></td><td>Through <code>notify-send</code> on Linux and the tray on Windows. Clicking doesn't open the channel</td></tr>
       <tr><th>Accessibility</th><td><span class="chip part">partial</span></td><td>Font scale, interface size, reduced motion, keyboard palette, shortcuts you can change. No visible focus or high contrast</td></tr>
       <tr><th>Platforms</th><td><span class="chip part">partial</span></td><td>Linux and Windows 10/11. Tested daily on Arch with Hyprland; Windows is new.</td></tr>
-            <tr><th>Screen sharing and camera</th><td><span class="chip no">missing</span></td><td></td></tr>
+      <tr><th>Screen sharing and camera</th><td><span class="chip part">partial</span></td><td>Windows DXGI/WGC screen sharing up to 4K 60fps with process loopback audio and cameras, H.264 + DAVE E2EE compatible with the official Discord client. Linux capture is planned</td></tr>
     </tbody>
   </table>
   </div>
@@ -416,13 +416,13 @@
     <div class="dl-card" data-os="windows">
       <h3>Windows <small>10 / 11, x64</small></h3>
       <a class="btn" href="https://github.com/sukrusk/larperCord-tr/releases/latest/download/larpercord-windows-x86_64.zip" data-asset="larpercord-windows-x86_64.zip">Download for Windows ↓</a>
-      <p>Unzip it and open <code>larpercord.exe</code> in the <code>larperCord</code> folder, with the three DLLs next to it. Unzip it somewhere you can write to, not <code>C:\Program Files</code>, so it can update itself. It isn't code-signed yet: if SmartScreen stops it, click <em>More info</em>, then <em>Run anyway</em>.</p>
+      <p>Unzip it and open <code>larpercord.exe</code> in the <code>larperCord</code> folder (standalone single executable since 0.6.7). Unzip it somewhere you can write to, not <code>C:\Program Files</code>, so it can update itself. It isn't code-signed yet: if SmartScreen stops it, click <em>More info</em>, then <em>Run anyway</em>.</p>
       <p>Or install it for your user, in PowerShell, no administrator. It goes to <code>%LOCALAPPDATA%\Programs\larperCord</code>, with a Start menu entry:</p>
       <div class="dl-copy"><code class="dl-cmd">irm https://raw.githubusercontent.com/RshaCuDeVidro/larperCord/main/install.ps1 | iex</code><button class="copy" type="button" data-copy>copy</button></div>
     </div>
   </div>
   </div>
-  <p class="foot reveal"><span id="dl-version">v0.7.0 · </span><a href="https://github.com/sukrusk/larperCord-tr/releases">All versions and checksums</a> · <a href="https://github.com/sukrusk/larperCord-tr/blob/main/CHANGELOG.md">What changed</a> · <a href="guide/getting-started.html#install">Install guide</a></p>
+  <p class="foot reveal"><span id="dl-version">v0.8.0 · </span><a href="https://github.com/sukrusk/larperCord-tr/releases">All versions and checksums</a> · <a href="https://github.com/sukrusk/larperCord-tr/blob/main/CHANGELOG.md">What changed</a> · <a href="guide/getting-started.html#install">Install guide</a></p>
   <span class="close">}</span>
   <link rel="stylesheet" href="assets/site/extra.css">
   <script src="assets/site/os.js" defer></script>
@@ -482,7 +482,7 @@
 
 <footer class="colophon">
   <div>
-    <p><strong style="color:var(--text)">larperCord</strong> v0.7.0</p>
+    <p><strong style="color:var(--text)">larperCord</strong> v0.8.0</p>
     <p>An independent project. Not affiliated with, endorsed by or connected to Discord Inc. “Discord” is a trademark of its owner.</p>
     <p>Licensed under GPL-3.0. Third-party code keeps its own licenses.</p>
   </div>

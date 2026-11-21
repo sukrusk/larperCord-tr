@@ -74,7 +74,7 @@ Alguns itens aqui são o jeito como o larperCord fica leve, e o app oficial pode
 
 ## O que o app oficial tem e o larperCord não
 
-- **[Compartilhar tela (mandar ou assistir), câmera e chamada de vídeo](page:voice#limites-hoje).** O larperCord só faz voz, e isso não está nos planos.
+- **[Compartilhar tela e câmera no Linux](page:voice#limites-hoje).** No Windows, câmera, transmissão de tela até 4K 60fps com áudio isolado e compatibilidade H.264 + DAVE E2EE com o app oficial do Discord já funcionam; a captura no Linux ainda não foi implementada.
 - **[Aperte para falar fora da janela, no Linux](page:voice#limites-hoje).** No Linux só funciona com a janela em foco, porque o SDL não tem atalho global portátil. Um atalho global está no roteiro. No Windows funciona de qualquer janela.
 - **[Notificação que abre a conversa](page:status#o-que-funciona-hoje).** Clicar numa ainda não abre o canal.
 - **[Configurações de servidor e de cargos](page:features#servidores-e-grupos).** Aqui dá para editar nome, descrição, ícone e banner de um servidor, dar ou tirar cargos, e expulsar, banir, castigar, ou silenciar e ensurdecer membros no servidor. O resto está no roteiro.

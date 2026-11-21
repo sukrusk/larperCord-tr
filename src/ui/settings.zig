@@ -1410,6 +1410,7 @@ fn memoryRows(p: *Page) void {
         statRow(p, row_h, i18n.tr("Livre, ainda não devolvida", "Free, not returned yet"), mbText(&v, "", free));
     }
     if (file > 0) statRow(p, row_h, i18n.tr("Driver, bibliotecas e fontes", "Driver, libraries and fonts"), mbText(&v, "", file));
+    if (sys.windows) statRow(p, row_h, i18n.tr("RAM física (Working Set)", "Physical RAM (Working Set)"), mbText(&v, "", sys.workingSetKb()));
     p.note(i18n.tr("Com ~ é estimativa. As imagens podem estar na memória da placa de vídeo, e não na RAM.", "Values with ~ are estimates. Images may live in video memory rather than RAM."));
 }
 
@@ -1435,9 +1436,15 @@ fn performance(p: *Page) void {
     p.divider();
     p.heading(i18n.tr("Limites de memória", "Memory limits"));
     const s = &ctx.st.settings;
-    p.slider(i18n.tr("Imagens na memória", "Images in memory"), &s.image_cache_mb, 16, 128, "{d:.0} MB", 1);
-    p.slider(i18n.tr("Cada GIF", "Each GIF"), &s.gif_limit_mb, 4, 32, "{d:.0} MB", 1);
-    p.slider(i18n.tr("Mensagens na memória", "Messages in memory"), &s.message_budget, 500, 5000, "{d:.0}", 1);
+    p.slider(i18n.tr("Imagens na memória", "Images in memory"), &s.image_cache_mb, 8, 128, "{d:.0} MB", 1);
+    p.slider(i18n.tr("Cada GIF", "Each GIF"), &s.gif_limit_mb, 2, 32, "{d:.0} MB", 1);
+    p.slider(i18n.tr("Mensagens na memória", "Messages in memory"), &s.message_budget, 300, 5000, "{d:.0}", 1);
+    p.toggle(
+        i18n.tr("Modo RAM mínima", "Minimum RAM mode"),
+        i18n.tr("Limita cache de imagens/GIFs (até 16 MB), reduz mensagens em RAM e descarrega índice de busca e imagens paradas em 15s.", "Caps image/GIF cache (up to 16 MB), trims stored messages, and unloads idle images and search index after 15s."),
+        &s.low_ram_mode,
+    );
+    if (p.buttonSoft(i18n.tr("Otimizar RAM agora", "Trim memory now"))) ctx.act(.trim_memory);
     p.note(i18n.tr("Menos memória custa um pouco de rede e CPU: o que saiu é buscado de novo ao voltar para a tela, e GIFs grandes pulam quadros.", "Less memory costs a little network and CPU: what left is fetched again when it comes back on screen, and big GIFs skip frames."));
 }
 

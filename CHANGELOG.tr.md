@@ -1,5 +1,18 @@
 # Sürüm Notları
 
+## 0.8.0
+
+**Minimum RAM ve Bellek Optimizasyonu**
+- `mem_tune.zig` modülüne gerçek Windows yığın sıkıştırma (`GetProcessHeaps` + `HeapCompact`) ve çalışma kümesi temizliği (`SetProcessWorkingSetSize`) eklendi; kamera, ekran paylaşımı veya çağrı kapatıldığında biriken Media Foundation/NVENC/COM belleği işletim sistemine geri verilir.
+- Çıkan kullanıcıların donanım/yazılım video kod çözücülerini bekletmeden serbest bırakmak için `removeVideoUser` çoklu düşürme kuyruğuyla `decThreadMain` iş parçacığını uyandıracak şekilde düzeltildi; WGC yakalama havuzu `3`'ten `2` yüzeye indirildi, `HwEncoder.out_buf` boyutu çözünürlüğe göre ölçeklendi (`512 KiB` 720p altı, `1 MiB` 1080p, `2 MiB` 4K), yalnızca ses çağrılarında UDP soket arabelleği `512 KiB` ile sınırlandı ve kamera yakalama->kodlayıcı arasındaki tam NV12 bellek kopyası işaretçi takasıyla sıfırlandı.
+- Ayarlar → Performans altına **Minimum RAM modu**, canlı **Fiziksel RAM (Çalışma Kümesi)** göstergesi, genişletilmiş bellek sınırları (`8..128 MB` görseller, `2..32 MB` GIF'ler, `300..5000` mesajlar), **Belleği şimdi temizle** düğmesi ve pencere açıkken boşta kalan yerel arama dizininin otomatik serbest bırakılması eklendi.
+
+**Ekran, Kamera ve Discord Uyumu**
+- Kamera için ekran paylaşımından bağımsız çözünürlük (`480p`/`720p`/`1080p`/Yayınla eşle), kare hızı (`15`/`30`/`60 FPS`) ve bit hızı (`Auto`, `2..10 Mbps`) ayarları eklendi; böylece 4K ekran paylaşımı açıkken web kamerası gereksiz 4K NV12 yüküne zorlanmaz.
+- Ayarlar → Ses ve Video altına kodlayıcı profili (`Hız` CBR / `Dengeli` CBR / `Kalite` PeakConstrainedVBR + `QualityVsSpeed`), ekran yakalama motoru (`Auto` / `DXGI` / `WGC`), sabit ekranda kare hızı (`2` / `4` / `10 FPS`) ve keyframe GOP aralığı (`1s` / `2s` / `4s`) eklendi; sahne HUD'una canlı süreç RAM bilgisi eklendi.
+- Resmi Discord istemcisinde kamera ve ekran paylaşımının sorunsuz görünmesi için Discord SFU üzerinde `OP 1`, `OP 4` (`video_codec`), `OP 12`, DAVE E2EE ve RTP paketleme uçtan uca `H.264` ile hizalandı; PLI/FIR keyframe istekleri gerçek bir IDR kare çıkana dek kalıcı hale getirildi; %100 sabit masaüstünde ilk kare gecikmesine karşı otomatik DXGI → WGC geçişi, Discord `STREAM_DELETE` neden bildirimleri ve ses/görüntü UDP trafiği için RFC 1928/1929 SOCKS5 `UDP ASSOCIATE` tüneli eklendi.
+- Çağrı ekranındaki kırmızı ayrıl düğmesinin köşe maskotu tarafından yakalanma hatası (`QA_SUITE=call`) giderildi, eski belgeler güncellendi ve Türkçe çeviriler eksiksiz tamamlandı.
+
 ## 0.7.0
 
 **Ağ, DoH ve GoodbyeDPI**

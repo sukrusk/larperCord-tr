@@ -42,6 +42,7 @@ const video_rtp = @import("../core/video_rtp.zig");
 const capture_backend = @import("../platform/capture_backend.zig");
 const video_diag = @import("../platform/video_diag.zig");
 const proxy = @import("proxy.zig");
+const socks5_udp = @import("socks5_udp.zig");
 const dpi = @import("dpi_bypass.zig");
 
 pub var hw_decode_pref: std.atomic.Value(bool) = .init(true);
@@ -320,7 +321,9 @@ pub const Voice = struct {
     }
 
     pub fn setVideoEnabled(v: *Voice, enabled: bool, codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32) void {
-        const eff: video_cfg.Codec = if (codec == .auto) .h264 else codec;
+        // Discord SFU RTP/DAVE no app negocia H.264 (pt=101) em OP 1.
+        _ = codec;
+        const eff: video_cfg.Codec = .h264;
         v.video_codec.store(@intFromEnum(eff), .release);
         v.video_w.store(w, .release);
         v.video_h.store(h, .release);
@@ -577,6 +580,7 @@ const Worker = struct {
     ws_sock: sys.Socket = sys.no_socket,
     last_pli_epoch: u32 = 0,
     udp: sys.Socket = sys.no_socket,
+    socks5: socks5_udp.Tunnel = .{},
     server: sys.SockAddrIn = undefined,
     ssrc: u32 = 0,
     secret: [32]u8 = @splat(0),
@@ -670,6 +674,9 @@ const Worker = struct {
     dec_count: u8 = 0,
     dec_wait_key: bool = false,
     dec_drop_user: std.atomic.Value(Id) = .init(0),
+    dec_drop_queue: [8]Id = @splat(0),
+    dec_drop_n: u8 = 0,
+    video_buf_bumped: bool = false,
 
     fn run(w: *Worker) Ended {
         defer w.cleanup();
@@ -824,6 +831,7 @@ const Worker = struct {
             w.pending_ext_sender = &.{};
         }
         if (sys.valid(w.udp)) sys.closeSocket(w.udp);
+        w.socks5.close();
         w.closeWs();
         std.crypto.secureZero(u8, &w.secret);
         w.ws_in.deinit(alloc);
@@ -919,7 +927,7 @@ const Worker = struct {
         if (!w.connected) return;
         if (now >= w.next_keepalive) {
             const keep = [_]u8{ 0x13, 0x37 };
-            _ = sys.sendTo(w.udp, &keep, &w.server);
+            _ = w.sendUdp(&keep);
             w.next_keepalive = now + 5000;
         }
         if (now >= w.next_frame) {
@@ -1294,25 +1302,30 @@ const Worker = struct {
             return;
         };
         w.udp = fd;
-        sys.bumpUdpBufs(w.udp, 2 * 1024 * 1024);
+        // Começa enxuto (512 KiB) em call só de áudio; sobe para 2 MiB se vídeo ativar.
+        sys.bumpUdpBufs(w.udp, 512 * 1024);
         if (!sys.bindAny(w.udp)) {
             w.v.notice("não consegui abrir o UDP da call", "couldn't open the call UDP", .{});
             w.end = .fatal;
             return;
         }
+        w.initUdpProxy();
         // IP discovery: o pedido tem 74 bytes (cabeçalho de 4 + ssrc + 66).
         var pkt: [74]u8 = @splat(0);
         std.mem.writeInt(u16, pkt[0..2], 1, .big);
         std.mem.writeInt(u16, pkt[2..4], 70, .big);
         std.mem.writeInt(u32, pkt[4..8], w.ssrc, .big);
         for (0..5) |_| {
-            _ = sys.sendTo(w.udp, &pkt, &w.server);
+            _ = w.sendUdp(&pkt);
             const deadline = nowMs() + 1000;
             while (nowMs() < deadline and !w.v.stopping.load(.acquire)) {
                 w.waitSockets(100);
-                var resp: [256]u8 = undefined;
-                const nr = sys.recvNow(w.udp, &resp);
-                if (nr < 74) continue;
+                var resp_raw: [288]u8 = undefined;
+                const resp = switch (w.recvUdp(&resp_raw)) {
+                    .data => |pkt_data| pkt_data,
+                    .eof, .drop => continue,
+                };
+                if (resp.len < 74) continue;
                 if (std.mem.readInt(u16, resp[0..2], .big) != 2) continue;
                 const iplen = std.mem.indexOfScalar(u8, resp[8..72], 0) orelse 64;
                 const ext_port = std.mem.readInt(u16, resp[72..74], .big);
@@ -1391,6 +1404,10 @@ const Worker = struct {
         const dave_ver: u16 = @intCast(std.math.clamp(j.int(j.get(d, "dave_protocol_version")) orelse 0, 0, 1));
         const vcodec_s = j.str(j.get(d, "video_codec")) orelse "none";
         dbg("sessão pronta (DAVE v{d}, video={s})", .{ dave_ver, vcodec_s });
+        if (std.ascii.eqlIgnoreCase(vcodec_s, "H264")) {
+            w.v.video_codec.store(@intFromEnum(video_cfg.Codec.h264), .release);
+            w.video_pt = 101;
+        }
         if (dave_ver > 0 and w.dave == null) {
             w.initDave(dave_ver);
             w.sendKeyPackage();
@@ -1496,6 +1513,10 @@ const Worker = struct {
         if (primary != 0) {
             video_diag.setOp12Ssrc(primary);
             dbg("op 12 peer={d} video_ssrc={d}", .{ uid, primary });
+            if (primary != 0 and !w.video_buf_bumped and sys.valid(w.udp)) {
+                sys.bumpUdpBufs(w.udp, 2 * 1024 * 1024);
+                w.video_buf_bumped = true;
+            }
             w.sendMediaSinkWants(primary);
             w.sendVideoPli(primary);
         } else {
@@ -1520,6 +1541,15 @@ const Worker = struct {
             if (rx.active and rx.user == uid) rx.deinit();
         }
         w.dec_drop_user.store(uid, .release);
+        if (w.dec_mu) |mu| {
+            _ = c.SDL_LockMutex(mu);
+            if (w.dec_drop_n < w.dec_drop_queue.len) {
+                w.dec_drop_queue[w.dec_drop_n] = uid;
+                w.dec_drop_n += 1;
+            }
+            if (w.dec_cond) |cond| _ = c.SDL_SignalCondition(cond);
+            _ = c.SDL_UnlockMutex(mu);
+        }
         media_bridge.clearRemote(uid, w.v.is_stream);
     }
 
@@ -1554,6 +1584,11 @@ const Worker = struct {
         _ = w.sendText(out.items);
         if (want) {
             if (w.dave) |*dave| dave.setLocalVideoSsrc(w.video_ssrc, activeDaveCodec(w));
+            if (!w.video_buf_bumped and sys.valid(w.udp)) {
+                sys.bumpUdpBufs(w.udp, 2 * 1024 * 1024);
+                w.video_buf_bumped = true;
+            }
+            if (want) w.v.video_keyframe_req.store(true, .release);
             w.v.video_keyframe_req.store(true, .release);
             w.last_key_req_ms = nowMs();
         } else {
@@ -1744,7 +1779,7 @@ const Worker = struct {
         @memcpy(buf[aad_len + body_len ..][0..16], &tag);
         @memcpy(buf[aad_len + body_len + 16 ..][0..4], nonce[0..4]);
         const total = aad_len + body_len + 16 + 4;
-        _ = sys.sendTo(w.udp, buf[0..total], &w.server);
+        _ = w.sendUdp(buf[0..total]);
         if (!is_rtx) {
             w.video_tx_pkts +%= 1;
             w.video_tx_octets +%= @intCast(payload.len);
@@ -1782,7 +1817,7 @@ const Worker = struct {
         aead.encrypt(buf[8..28], &tag, sr[8..28], buf[0..8], nonce, w.secret);
         @memcpy(buf[28..44], &tag);
         @memcpy(buf[44..48], nonce[0..4]);
-        _ = sys.sendTo(w.udp, &buf, &w.server);
+        _ = w.sendUdp(&buf);
     }
 
     fn sendVideoPli(w: *Worker, media_ssrc: u32) void {
@@ -1800,7 +1835,44 @@ const Worker = struct {
         aead.encrypt(buf[8..12], &tag, pli[8..12], buf[0..8], nonce, w.secret);
         @memcpy(buf[12..28], &tag);
         @memcpy(buf[28..32], nonce[0..4]);
-        _ = sys.sendTo(w.udp, &buf, &w.server);
+        _ = w.sendUdp(&buf);
+    }
+
+    fn initUdpProxy(w: *Worker) void {
+        w.socks5.close();
+        var pb: proxy.Buf = undefined;
+        if (proxy.forDiscord(&pb)) |purl| {
+            if (socks5_udp.open(purl)) |tun| {
+                w.socks5 = tun;
+                dbg("voz/vídeo via proxy SOCKS5 UDP relay", .{});
+            } else |err| switch (err) {
+                error.NotSocks5 => dbg("proxy HTTP/HTTPS não suporta UDP de voz; tentando direto", .{}),
+                else => dbg("SOCKS5 UDP associate falhou ({s}); tentando UDP direto", .{@errorName(err)}),
+            }
+        }
+    }
+
+    fn sendUdp(w: *Worker, payload: []const u8) isize {
+        if (!sys.valid(w.udp)) return -1;
+        if (w.socks5.active) {
+            var wrapped: [16 + 1500]u8 = undefined;
+            const parts = socks5_udp.addrParts(&w.server);
+            const pkt = socks5_udp.wrapPacket(parts.ip, parts.port, payload, &wrapped) orelse return -1;
+            return sys.sendTo(w.udp, pkt, &w.socks5.relay);
+        }
+        return sys.sendTo(w.udp, payload, &w.server);
+    }
+
+    const UdpRecv = union(enum) { eof, drop, data: []const u8 };
+
+    fn recvUdp(w: *Worker, raw_buf: []u8) UdpRecv {
+        const nr = sys.recvNow(w.udp, raw_buf);
+        if (nr <= 0) return .eof;
+        const raw = raw_buf[0..@intCast(nr)];
+        if (w.socks5.active) {
+            return if (socks5_udp.unwrapPacket(raw)) |p| .{ .data = p } else .drop;
+        }
+        return .{ .data = raw };
     }
 
     fn sendKeyPackage(w: *Worker) void {
@@ -1816,9 +1888,11 @@ const Worker = struct {
         if (!sys.valid(w.udp)) return;
         for (0..1024) |_| {
             var buf: [2048]u8 = undefined;
-            const nr = sys.recvNow(w.udp, &buf);
-            if (nr <= 0) return;
-            w.onRtp(buf[0..@intCast(nr)]);
+            switch (w.recvUdp(&buf)) {
+                .eof => return,
+                .drop => continue,
+                .data => |pkt| w.onRtp(pkt),
+            }
         }
     }
 
@@ -1965,7 +2039,7 @@ const Worker = struct {
         @memcpy(buf[off + payload.len ..][0..16], &tag);
         @memcpy(buf[off + payload.len + 16 ..][0..4], nonce[0..4]);
         const total = off + payload.len + 16 + 4;
-        const rc = sys.sendTo(w.udp, buf[0..total], &w.server);
+        const rc = w.sendUdp(buf[0..total]);
         if (rc < 0) dbg("sendto falhou", .{}) else {
             w.sent_frames += 1;
             w.audio_tx_pkts +%= 1;
@@ -2574,21 +2648,38 @@ fn decThreadMain(data: ?*anyopaque) callconv(.c) c_int {
     var logged_first = false;
 
     while (!w.dec_stop.load(.acquire)) {
-        const drop_uid = w.dec_drop_user.swap(0, .acq_rel);
-        if (drop_uid != 0) {
-            for (&slots) |*ds| if (ds.active and ds.user == drop_uid) {
-                ds.dec.deinit();
-                ds.* = .{};
-            };
-        }
-
         c.SDL_LockMutex(mu);
-        while (w.dec_count == 0 and !w.dec_stop.load(.acquire)) {
+        while (w.dec_count == 0 and w.dec_drop_n == 0 and w.dec_drop_user.load(.acquire) == 0 and !w.dec_stop.load(.acquire)) {
             c.SDL_WaitCondition(cond, mu);
         }
+        var drop_local: [8]Id = @splat(0);
+        var drop_n: usize = 0;
+        const single_drop = w.dec_drop_user.swap(0, .acq_rel);
+        if (single_drop != 0) {
+            drop_local[0] = single_drop;
+            drop_n = 1;
+        }
+        for (w.dec_drop_queue[0..w.dec_drop_n]) |uid| {
+            if (drop_n < drop_local.len and uid != 0) {
+                drop_local[drop_n] = uid;
+                drop_n += 1;
+            }
+        }
+        w.dec_drop_n = 0;
         if (w.dec_stop.load(.acquire)) {
             c.SDL_UnlockMutex(mu);
             break;
+        }
+        if (drop_n > 0) {
+            c.SDL_UnlockMutex(mu);
+            for (drop_local[0..drop_n]) |uid| {
+                for (&slots) |*ds| if (ds.active and ds.user == uid) {
+                    ds.dec.deinit();
+                    ds.* = .{};
+                };
+            }
+            @import("../platform/mem_tune.zig").compact();
+            continue;
         }
         const job = &w.dec_ring[w.dec_head];
         const j_len = job.len;
@@ -3115,6 +3206,10 @@ const Dave = struct {
         if (d.encryptor != null) c.daveEncryptorAssignSsrcToCodec(d.encryptor, ssrc, codec);
     }
 };
+
+test {
+    _ = socks5_udp;
+}
 
 test "Voice.daveGroup usa rtc_server_id - 1 para Go Live mesmo com rtc_channel_id distinto" {
     const t = std.testing;
