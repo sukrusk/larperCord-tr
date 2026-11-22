@@ -334,15 +334,18 @@ pub const Voice = struct {
     }
 
     pub fn setVideoEnabled(v: *Voice, enabled: bool, codec: video_cfg.Codec, w: u16, h: u16, fps: u8, bitrate_kbps: u32) void {
-        // Discord SFU RTP/DAVE no app negocia H.264 (pt=101) em OP 1.
+        // Discord SFU RTP/DAVE no app negocia H.264 (pt=101) em OP 1 (máx. 1080p / 8 Mbps para Go Live).
         _ = codec;
         const eff: video_cfg.Codec = .h264;
+        const cw: u16 = if (v.is_stream) @min(w, 1920) else w;
+        const ch: u16 = if (v.is_stream) @min(h, 1080) else h;
+        const cbr: u32 = if (v.is_stream) std.math.clamp(bitrate_kbps, 500, 8000) else @max(bitrate_kbps, 500);
         v.video_codec.store(@intFromEnum(eff), .release);
-        v.video_w.store(w, .release);
-        v.video_h.store(h, .release);
-        v.video_fps.store(@max(fps, 1), .release);
-        v.video_bitrate.store(@max(bitrate_kbps, 500), .release);
-        v.video_target_kbps.store(@max(bitrate_kbps, 500), .release);
+        v.video_w.store(cw, .release);
+        v.video_h.store(ch, .release);
+        v.video_fps.store(std.math.clamp(fps, 1, 60), .release);
+        v.video_bitrate.store(cbr, .release);
+        v.video_target_kbps.store(cbr, .release);
         const was_enabled = v.video_enabled.swap(enabled, .acq_rel);
         _ = v.video_cfg_gen.fetchAdd(1, .release);
         if (enabled) {
@@ -1635,7 +1638,7 @@ const Worker = struct {
             w.v.video_h.load(.acquire),
             w.v.video_fps.load(.acquire),
             bw_bps,
-            "video",
+            if (w.v.is_stream) "screen" else "video",
         ) catch return;
         dbg("enviou op 12 video active={} ssrc={d} {d}x{d}@{d}", .{
             want,

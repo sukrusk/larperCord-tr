@@ -1,5 +1,13 @@
 # Sürüm Notları
 
+## 0.8.4
+
+**Discord 1080p Yayın Düzeltmesi**
+- `voice.zig` (`syncVideoOp12`) içinde Go Live `OP 12` paketinin `"video"` yerine `"type":"screen"` göndermesi düzeltildi; `discord.zig` tarafında `STREAM_CREATE` anahtar eşleşmesi ve `.update_stream_cfg` kurtarma akışı sağlamlaştırıldı.
+- Ekran paylaşımındaki `4K` / `1440p`, `15–25 Mbps`, `HEVC`/`AV1` ve `P2P Direct (4K)` seçenekleri tamamen kaldırıldı (`stream_picker.zig`, `stream_view.zig`, `settings_voz.zig`, `video_cfg.zig`, `settings_state.zig`, `app.zig`, `live_video.zig`); Discord Go Live yalnızca `720p` / `1080p` H.264 ve en fazla `8 Mbps` (varsayılan `1080p`) olacak şekilde sınırlandı.
+- Canlı yayın ayarları penceresinin her pencere yüksekliğinde açılması için konum sınırlandırması düzeltildi, sağ tık ekran paylaşımı menüsüne **Canlı Yayın Ayarları** eklendi (`device_menu.zig`) ve uzaktan kontrol odak kontrolü kararlı hale getirildi (`stream_view.zig`).
+- Sadeleştirilmiş Discord 1080p ekran paylaşımı kontrolleri için Türkçe çeviriler (`i18n/tr.kdl`) güncellendi.
+
 ## 0.8.3
 
 **Canlı Yayın ve Ses Kontrolü**

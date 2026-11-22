@@ -1733,9 +1733,11 @@ pub const Gateway = struct {
             const rtc_srv = j.id(j.get(d, "rtc_server_id")) orelse psk.guild;
             const rtc_ch = j.id(j.get(d, "rtc_channel_id")) orelse 0;
             g.saveStreamMeta(sk, rtc_srv, rtc_ch);
-            const is_mine = psk.owner != 0 and psk.owner == g.me and g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk);
+            const is_mine = psk.owner != 0 and psk.owner == g.me and ((g.stream_key_len > 0 and std.mem.eql(u8, g.stream_key[0..g.stream_key_len], sk)) or (psk.channel != 0 and psk.channel == g.voice_channel));
             const is_watching = g.watch_key_len > 0 and std.mem.eql(u8, g.watch_key[0..g.watch_key_len], sk);
             if (is_mine) {
+                g.stream_key_len = @intCast(@min(sk.len, g.stream_key.len - 1));
+                @memcpy(g.stream_key[0..g.stream_key_len], sk[0..g.stream_key_len]);
                 g.stream_rtc_server = rtc_srv;
                 g.stream_rtc_channel = rtc_ch;
                 var pb: [256]u8 = undefined;
@@ -5135,12 +5137,16 @@ pub const Gateway = struct {
                 }
                 if (g.voice_channel != 0) g.queueOp(.{ .voice = .{ .guild = g.voice_guild, .channel = g.voice_channel, .mute = g.voice_mute, .deaf = g.voice_deaf, .video = false } });
             },
-            .start_stream => |cfg| {
+            .start_stream => |cfg_in| {
                 if (g.voice_channel != 0) {
                     g.killStreamVoice();
-                    const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu or cfg.codec == .auto) .h264 else cfg.codec;
+                    var cfg = cfg_in;
+                    cfg.resolution = cfg.resolution.clampDiscord();
+                    cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+                    cfg.codec = .h264;
+                    cfg.transport = .discord_sfu;
+                    cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
                     g.stream_cfg = cfg;
-                    g.stream_cfg.codec = eff_codec;
                     g.stream_rtc_server = 0;
                     g.stream_rtc_channel = 0;
                     g.stream_endpoint_len = 0;
@@ -5163,7 +5169,7 @@ pub const Gateway = struct {
                         .width = @intCast(dims[0]),
                         .height = @intCast(dims[1]),
                         .fps = cfg.fps,
-                        .codec = eff_codec,
+                        .codec = .h264,
                         .has_audio = cfg.share_audio,
                         .remote_perm = cfg.remote_perm,
                         .stream_key = k.buf,
@@ -5171,14 +5177,26 @@ pub const Gateway = struct {
                     } });
                 }
             },
-            .update_stream_cfg => |cfg| {
+            .update_stream_cfg => |cfg_in| {
                 if (g.voice_channel != 0) {
-                    const eff_codec: video_cfg.Codec = if (cfg.transport == .discord_sfu or cfg.codec == .auto) .h264 else cfg.codec;
+                    var cfg = cfg_in;
+                    cfg.resolution = cfg.resolution.clampDiscord();
+                    cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+                    cfg.codec = .h264;
+                    cfg.transport = .discord_sfu;
+                    cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
                     g.stream_cfg = cfg;
-                    g.stream_cfg.codec = eff_codec;
                     const dims = cfg.resolution.dims();
                     if (g.stream_voice) |sv| {
-                        sv.setVideoEnabled(true, eff_codec, @intCast(dims[0]), @intCast(dims[1]), cfg.fps, cfg.bitrate_kbps);
+                        sv.setVideoEnabled(true, .h264, @intCast(dims[0]), @intCast(dims[1]), cfg.fps, cfg.bitrate_kbps);
+                    } else if (g.stream_key_len == 0) {
+                        var buf: [256]u8 = undefined;
+                        if (call_json.streamCreate(&buf, g.voice_guild, g.voice_channel)) |p| _ = g.writeWs(p);
+                        const sk_new = if (g.voice_guild != 0)
+                            std.fmt.bufPrint(&g.stream_key, "guild:{d}:{d}:{d}", .{ g.voice_guild, g.voice_channel, g.me }) catch ""
+                        else
+                            std.fmt.bufPrint(&g.stream_key, "call:{d}:{d}", .{ g.voice_channel, g.me }) catch "";
+                        g.stream_key_len = @intCast(sk_new.len);
                     }
                     const sk = g.stream_key[0..g.stream_key_len];
                     const k = ev.StreamInfo.fromKey(sk);
@@ -5191,7 +5209,7 @@ pub const Gateway = struct {
                         .width = @intCast(dims[0]),
                         .height = @intCast(dims[1]),
                         .fps = cfg.fps,
-                        .codec = eff_codec,
+                        .codec = .h264,
                         .has_audio = cfg.share_audio,
                         .remote_perm = cfg.remote_perm,
                         .stream_key = k.buf,

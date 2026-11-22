@@ -97,19 +97,19 @@ fn startConfiguredCamTest(s: *const @import("settings_state.zig").Settings) bool
 fn bitrateToIdx(mbps: u8) u8 {
     return switch (mbps) {
         0 => 0,
-        1...5 => 1,
-        6...11 => 2,
-        12...20 => 3,
+        1...3 => 1,
+        4...5 => 2,
+        6...7 => 3,
         else => 4,
     };
 }
 
 fn idxToMbps(idx: u8) u8 {
     return switch (idx) {
-        1 => 4,
-        2 => 8,
-        3 => 15,
-        4 => 25,
+        1 => 3,
+        2 => 4,
+        3 => 6,
+        4 => 8,
         else => 0,
     };
 }
@@ -164,8 +164,8 @@ pub fn draw(p: anytype) void {
     p.divider();
     p.heading(i18n.tr("Vídeo e Câmera", "Video & Camera"));
     p.note(i18n.tr(
-        "Escolha sua webcam, qualidade da câmera, tela 4K e perfil de desempenho na aba Vídeo e Câmera.",
-        "Pick your webcam, camera quality, 4K screen share and performance profile in Video & Camera.",
+        "Escolha sua webcam, qualidade da câmera, compartilhamento de tela (Discord 1080p) e perfil de desempenho na aba Vídeo e Câmera.",
+        "Pick your webcam, camera quality, screen share (Discord 1080p) and performance profile in Video & Camera.",
     ));
     if (p.buttonSoft(i18n.tr("Abrir Vídeo e Câmera", "Open Video & Camera"))) s.page = .video;
 }
@@ -287,21 +287,21 @@ pub fn drawVideo(p: anytype) void {
     );
 
     p.divider();
-    p.heading(i18n.tr("Vídeo e Transmissão 4K", "4K Video & Screen Share"));
+    p.heading(i18n.tr("Transmissão de Tela (Discord 1080p)", "Screen Share (Discord 1080p)"));
     p.note(i18n.tr(
-        "Resolução padrão para Go Live em NV12 de baixa memória (~11,9 MiB em 4K).",
-        "Default Go Live quality using low-RAM NV12 frames (~11.9 MiB at 4K).",
+        "Resolução padrão para Go Live do Discord em NV12 de baixa memória (~3,0 MiB em 1080p).",
+        "Default Discord Go Live quality using low-RAM NV12 frames (~3.0 MiB at 1080p).",
     ));
-    p.segmented(&.{ "720p", "1080p", "1440p", "4K" }, &s.video_res);
+    if (s.video_res > 1) s.video_res = 1;
+    p.segmented(&.{ "720p", "1080p" }, &s.video_res);
     p.segmented(&.{ "30 FPS", "60 FPS" }, &s.video_fps);
-    p.segmented(&.{ "Auto", "H.264", "HEVC", "AV1" }, &s.video_codec);
     var br_idx = bitrateToIdx(s.video_bitrate_mbps);
     const prev_br_idx = br_idx;
-    p.segmented(&.{ i18n.tr("Otomatik", "Auto"), "4 Mbps", "8 Mbps", "15 Mbps", "25 Mbps" }, &br_idx);
+    p.segmented(&.{ i18n.tr("Otomatik", "Auto"), "3 Mbps", "4 Mbps", "6 Mbps", "8 Mbps" }, &br_idx);
     if (br_idx != prev_br_idx) s.video_bitrate_mbps = idxToMbps(br_idx);
     p.toggle(
         i18n.tr("Aceleração em GPU (DX11/Media Foundation)", "GPU hardware acceleration (DX11/Media Foundation)"),
-        i18n.tr("Mantém os quadros 4K na VRAM da GPU sem cópias extras na RAM.", "Keeps 4K frames in GPU VRAM without extra CPU RAM copies."),
+        i18n.tr("Mantém os quadros 1080p na VRAM da GPU sem cópias extras na RAM.", "Keeps 1080p frames in GPU VRAM without extra CPU RAM copies."),
         &s.video_hw,
     );
     p.segmented(&.{ i18n.tr("Velocidade", "Speed"), i18n.tr("Equilibrado", "Balanced"), i18n.tr("Qualidade", "Quality") }, &s.video_perf_preset);
@@ -312,8 +312,8 @@ pub fn drawVideo(p: anytype) void {
     if (kf_idx != prev_kf_idx) s.video_kf_sec = idxToKfSec(kf_idx);
     p.segmented(&.{ "2 FPS (Eco)", "4 FPS", "10 FPS" }, &s.video_static_fps);
     p.note(i18n.tr(
-        "No Discord SFU o app negocia H.264 + DAVE + OP 12 para aparecer no cliente oficial do Discord; WGC evita congelamento em tela parada. HEVC/AV1 valem para P2P direto.",
-        "On Discord SFU, the app negotiates H.264 + DAVE + OP 12 so streams appear in the official Discord client; WGC prevents static-screen stalls. HEVC/AV1 apply to direct P2P.",
+        "No Discord SFU o app negocia H.264 + DAVE + OP 12 em até 1080p para aparecer no cliente oficial do Discord; WGC evita congelamento em tela parada.",
+        "On Discord SFU, the app negotiates H.264 + DAVE + OP 12 up to 1080p so streams appear in the official Discord client; WGC prevents static-screen stalls.",
     ));
     p.toggle(
         i18n.tr("Paylaşımda fare imlecini göster", "Show mouse cursor while sharing"),

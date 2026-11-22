@@ -1,5 +1,13 @@
 # What changed in each version
 
+## 0.8.4
+
+**Discord 1080p Go Live Fixes**
+- Fixed Go Live outbound `OP 12` signaling in `voice.zig` (`syncVideoOp12`) to send `"type":"screen"` instead of `"video"` on `stream_voice`, and made `STREAM_CREATE` key matching and `.update_stream_cfg` recovery more reliable in `discord.zig`.
+- Removed `4K` / `1440p`, `15–25 Mbps`, `HEVC`/`AV1` and `P2P Direct (4K)` options from screen sharing (`stream_picker.zig`, `stream_view.zig`, `settings_voz.zig`, `video_cfg.zig`, `settings_state.zig`, `app.zig`, `live_video.zig`), capping Discord Go Live strictly to `720p` / `1080p` H.264 up to `8 Mbps` (default `1080p`).
+- Fixed live stream settings popover clamping so it opens reliably at any stage height, added **Live Stream Settings** to the right-click share menu (`device_menu.zig`), and stabilized remote control focus checks (`stream_view.zig`).
+- Updated Turkish translations (`i18n/tr.kdl`) for the streamlined Discord 1080p screen-share controls.
+
 ## 0.8.3
 
 **Live Stream Controls & Audio**

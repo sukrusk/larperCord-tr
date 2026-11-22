@@ -87,7 +87,7 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
         else if (owner == ctx.store.me)
             i18n.tr("Iniciando captura NV12…", "Starting NV12 capture…")
         else
-            i18n.tr("Aguardando quadro 4K NV12… (use Kare İste se demorar)", "Waiting for 4K NV12 frame… (click Keyframe if stuck)");
+            i18n.tr("Aguardando vídeo da transmissão… (use Kare İste se demorar)", "Waiting for stream video… (click Keyframe if stuck)");
         const tw = d.width(fam.get(.medium), 14, wait_txt);
         d.text(dl, fam.get(.medium), 14, r.x + (r.w - tw) / 2, d.centerY(r, 14), ctx.col(.muted), wait_txt);
     }
@@ -353,7 +353,7 @@ fn drawTarget(ctx: *d.Ctx, r: d.Rect, owner: u64, is_cam: bool) void {
     }
 
     // Captura de entrada remota quando o controle estilo AnyDesk estiver ativo no espectador.
-    const app_focused = !ctx.io.*.AppFocusLost and c.SDL_GetKeyboardFocus() != null;
+    const app_focused = ctx.st.window_focused and !ctx.io.*.AppFocusLost;
     const rc_viewer = !is_cam and ctx.st.remote_ctrl_status == .active_viewer and ctx.st.remote_ctrl_peer == owner;
     const dragging_btn = was_down_l or was_down_r or was_down_m or was_down_x1 or was_down_x2;
     const rc_eligible = rc_viewer and view != null and (dragging_btn or !ctrl_hovered) and ctx.st.popup == .none and !ctx.st.settings.open and !ctx.st.palette.open and app_focused;
@@ -573,12 +573,12 @@ fn drawCamOverlayStrip(ctx: *d.Ctx, r: d.Rect) bool {
     return hovered_any;
 }
 
-/// Painel rápido ao vivo para alterar resolução, FPS, bitrate, preset, áudio e cursor sem cair da live.
+/// Painel rápido ao vivo para alterar resolução (720p/1080p), FPS, bitrate, preset, áudio e cursor sem cair da live.
 fn drawStreamSettingsPopover(ctx: *d.Ctx, r: d.Rect, top_y: f32) bool {
     const pw: f32 = @min(312, @max(r.w - 24, 220));
     const ph: f32 = 304;
-    if (r.h < top_y - r.y + ph + 16) return false;
-    const pr: d.Rect = .{ .x = r.right() - 10 - pw, .y = top_y, .w = pw, .h = ph };
+    const py: f32 = @max(r.y + 8, @min(top_y, r.bottom() - ph - 8));
+    const pr: d.Rect = .{ .x = @max(r.x + 8, r.right() - 10 - pw), .y = py, .w = pw, .h = ph };
     const dl = ctx.dl;
     const fam = ctx.ui;
     qa.mark(pr, "stream-settings-popover", .{});
@@ -596,19 +596,12 @@ fn drawStreamSettingsPopover(ctx: *d.Ctx, r: d.Rect, top_y: f32) bool {
     d.text(dl, fam.get(.bold), 13, pr.x + pad, yy, ctx.col(.text), i18n.tr("Configurações da transmissão", "Live Stream Settings"));
     yy += 24;
 
-    // Resolução
+    // Resolução (Discord: 720p / 1080p)
     d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Resolução", "Resolution"));
     yy += 16;
-    const res_opts = [_]video_cfg.Resolution{ .p720, .p1080, .p1440, .p2160 };
-    const res_lbls = [_][]const u8{ "720p", "1080p", "1440p", "4K" };
-    if (pillRow(ctx, dl, fam, 0x9260, pr.x + pad, yy, cw, &res_lbls, blk: {
-        var idx: usize = 1;
-        for (res_opts, 0..) |ro, i| if (ro == cfg.resolution) {
-            idx = i;
-            break;
-        };
-        break :blk idx;
-    })) |picked| {
+    const res_opts = [_]video_cfg.Resolution{ .p720, .p1080 };
+    const res_lbls = [_][]const u8{ "720p", "1080p" };
+    if (pillRow(ctx, dl, fam, 0x9260, pr.x + pad, yy, cw, &res_lbls, if (cfg.resolution == .p720) 0 else 1)) |picked| {
         next.resolution = res_opts[picked];
         if (ctx.st.settings.video_bitrate_mbps == 0) {
             next.bitrate_kbps = next.resolution.defaultBitrateKbps(next.fps);
@@ -630,34 +623,34 @@ fn drawStreamSettingsPopover(ctx: *d.Ctx, r: d.Rect, top_y: f32) bool {
     }
     yy += 30;
 
-    // Bitrate
+    // Bitrate (Discord 1080p: Auto / 3M / 4M / 6M / 8M)
     d.text(dl, fam.get(.semibold), 11, pr.x + pad, yy, ctx.col(.muted), i18n.tr("Taxa de bits (Bitrate)", "Bitrate"));
     yy += 16;
     const auto_br = cfg.resolution.defaultBitrateKbps(cfg.fps);
     const br_cur: usize = if (cfg.bitrate_kbps == auto_br and ctx.st.settings.video_bitrate_mbps == 0)
         0
-    else if (cfg.bitrate_kbps <= 4500)
+    else if (cfg.bitrate_kbps <= 3500)
         1
-    else if (cfg.bitrate_kbps <= 9000)
+    else if (cfg.bitrate_kbps <= 5000)
         2
-    else if (cfg.bitrate_kbps <= 16500)
+    else if (cfg.bitrate_kbps <= 7000)
         3
     else
         4;
-    const br_lbls = [_][]const u8{ i18n.tr("Auto", "Auto"), "4M", "8M", "15M", "25M" };
+    const br_lbls = [_][]const u8{ i18n.tr("Auto", "Auto"), "3M", "4M", "6M", "8M" };
     if (pillRow(ctx, dl, fam, 0x9270, pr.x + pad, yy, cw, &br_lbls, br_cur)) |picked| {
         next.bitrate_kbps = switch (picked) {
-            1 => 4000,
-            2 => 8000,
-            3 => 15000,
-            4 => 25000,
+            1 => 3000,
+            2 => 4000,
+            3 => 6000,
+            4 => 8000,
             else => next.resolution.defaultBitrateKbps(next.fps),
         };
         ctx.st.settings.video_bitrate_mbps = switch (picked) {
-            1 => 4,
-            2 => 8,
-            3 => 15,
-            4 => 25,
+            1 => 3,
+            2 => 4,
+            3 => 6,
+            4 => 8,
             else => 0,
         };
         changed = true;

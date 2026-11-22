@@ -34,14 +34,24 @@ pub const Resolution = enum(u8) {
         return switch (r) {
             .p480 => if (hi) 1800 else 1000,
             .p720 => if (hi) 3500 else 2200,
-            .p1080 => if (hi) 6500 else 4000,
-            .p1440 => if (hi) 8500 else 6000,
-            .p2160 => if (hi) 11000 else 8000,
+            .p1080, .p1440, .p2160 => if (hi) 6000 else 4000,
+        };
+    }
+
+    pub fn clampDiscord(r: Resolution) Resolution {
+        return switch (r) {
+            .p480 => .p480,
+            .p720 => .p720,
+            .p1080, .p1440, .p2160 => .p1080,
         };
     }
 
     pub fn fromByte(b: u8) Resolution {
-        return std.enums.fromInt(Resolution, b) orelse .p2160;
+        return switch (b) {
+            0 => .p720,
+            4 => .p480,
+            else => .p1080,
+        };
     }
 };
 
@@ -169,10 +179,10 @@ pub const StreamConfig = struct {
     kind: SourceKind = .screen,
     /// DisplayID, HWND/window handle ou CameraID.
     target_id: u64 = 0,
-    resolution: Resolution = .p2160,
+    resolution: Resolution = .p1080,
     fps: u8 = 60,
-    codec: Codec = .auto,
-    bitrate_kbps: u32 = 20_000,
+    codec: Codec = .h264,
+    bitrate_kbps: u32 = 6_000,
     share_audio: bool = true,
     capture_cursor: bool = true,
     preview_self: bool = true,
@@ -401,11 +411,15 @@ test "presets de transmissão e resolução devolvem valores esperados" {
     try t.expectEqual(@as(u32, 2_200), Resolution.p720.defaultBitrateKbps(30));
     try t.expectEqual(@as(u32, 3_500), Resolution.p720.defaultBitrateKbps(60));
     try t.expectEqual(@as(u32, 4_000), Resolution.p1080.defaultBitrateKbps(30));
-    try t.expectEqual(@as(u32, 6_500), Resolution.p1080.defaultBitrateKbps(60));
-    try t.expectEqual(@as(u32, 11_000), Resolution.p2160.defaultBitrateKbps(60));
+    try t.expectEqual(@as(u32, 6_000), Resolution.p1080.defaultBitrateKbps(60));
+    try t.expectEqual(@as(u32, 6_000), Resolution.p2160.defaultBitrateKbps(60));
+    try t.expectEqual(Resolution.p1080, Resolution.fromByte(3));
+    try t.expectEqual(Resolution.p1080, Resolution.fromByte(2));
+    try t.expectEqual(Resolution.p720, Resolution.fromByte(0));
+    try t.expectEqual(Resolution.p1080, Resolution.p2160.clampDiscord());
     try t.expectEqual(PerfPreset.balanced, PerfPreset.fromByte(99));
     try t.expect(PerfPreset.speed.qualityVsSpeed() < PerfPreset.balanced.qualityVsSpeed());
     try t.expect(PerfPreset.balanced.qualityVsSpeed() < PerfPreset.quality.qualityVsSpeed());
-    try t.expectEqual(Resolution.p1440, camResolution(3, .p1440));
-    try t.expectEqual(Resolution.p480, camResolution(0, .p1440));
+    try t.expectEqual(Resolution.p1080, camResolution(3, .p1080));
+    try t.expectEqual(Resolution.p480, camResolution(0, .p1080));
 }

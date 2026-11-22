@@ -15,12 +15,10 @@ const media_if = @import("../platform/media_if.zig");
 const capture_backend = @import("../platform/capture_backend.zig");
 
 const Draft = struct {
-    kind_idx: u8 = 0, // 0=tela, 1=janela, 2=demo 4K
-    res_idx: u8 = 3, // 0=720p, 1=1080p, 2=1440p, 3=4K
+    kind_idx: u8 = 0, // 0=tela, 1=janela, 2=demo (apenas em QA/demo)
+    res_idx: u8 = 1, // 0=720p, 1=1080p
     fps_idx: u8 = 1, // 0=30, 1=60
-    codec_idx: u8 = 0, // 0=Auto, 1=H264, 2=HEVC, 3=AV1
-    bitrate_idx: u8 = 0, // 0=Auto, 1=4M, 2=8M, 3=15M, 4=25M
-    transport_idx: u8 = 0, // 0=Discord SFU, 1=P2P Direct
+    bitrate_idx: u8 = 0, // 0=Auto, 1=3M, 2=4M, 3=6M, 4=8M
     remote_idx: u8 = 0, // 0=Off, 1=Mouse, 2=Full
     share_audio: bool = true,
     hw_accel: bool = true,
@@ -33,19 +31,19 @@ const Draft = struct {
 fn bitrateToIdx(mbps: u8) u8 {
     return switch (mbps) {
         0 => 0,
-        1...5 => 1,
-        6...11 => 2,
-        12...20 => 3,
+        1...3 => 1,
+        4...5 => 2,
+        6...7 => 3,
         else => 4,
     };
 }
 
 fn idxToMbps(idx: u8) u8 {
     return switch (idx) {
-        1 => 4,
-        2 => 8,
-        3 => 15,
-        4 => 25,
+        1 => 3,
+        2 => 4,
+        3 => 6,
+        4 => 8,
         else => 0,
     };
 }
@@ -79,19 +77,18 @@ pub fn presetKind(kind_idx: u8) void {
 }
 
 pub fn draw(ctx: *d.Ctx) void {
+    const allow_demo = qa.on() or ctx.store.demo;
     if (popup.appearing) {
         const s = &ctx.st.settings;
         refreshTargets();
-        const def_kind: u8 = if (c.SDL_getenv("LARPER_DEMO") != null or (display_count == 0 and window_count == 0)) 2 else if (display_count == 0 and window_count > 0) 1 else 0;
+        const def_kind: u8 = if (allow_demo and (c.SDL_getenv("LARPER_DEMO") != null or (display_count == 0 and window_count == 0))) 2 else if (display_count == 0 and window_count > 0) 1 else 0;
         const init_kind = force_kind_once orelse def_kind;
         force_kind_once = null;
         draft = .{
-            .kind_idx = init_kind,
-            .res_idx = @min(s.video_res, 3),
+            .kind_idx = if (!allow_demo and init_kind >= 2) 0 else init_kind,
+            .res_idx = @min(s.video_res, 1),
             .fps_idx = @min(s.video_fps, 1),
-            .codec_idx = @min(s.video_codec, 3),
             .bitrate_idx = bitrateToIdx(s.video_bitrate_mbps),
-            .transport_idx = 0,
             .remote_idx = @min(s.remote_ctrl_allow, 2),
             .share_audio = true,
             .hw_accel = s.video_hw,
@@ -108,9 +105,9 @@ pub fn draw(ctx: *d.Ctx) void {
     }
 
     const extra_disp_h: f32 = if (draft.kind_idx == 0 and display_count > 3) 36 else 0;
-    const base_h: f32 = if (draft.kind_idx == 1 and window_count > 0) 716 else 592 + extra_disp_h;
-    const dlg_h: f32 = @min(base_h, @max(ctx.win.h - 24, 480));
-    const r = forum.dialogRect(ctx, 560, dlg_h);
+    const base_h: f32 = if (draft.kind_idx == 1 and window_count > 0) 624 else 506 + extra_disp_h;
+    const dlg_h: f32 = @min(base_h, @max(ctx.win.h - 24, 440));
+    const r = forum.dialogRect(ctx, 540, dlg_h);
     const dl = popup.beginWindow("##stream-picker", r);
     defer c.ImGui_End();
     const prev_dl = ctx.dl;
@@ -140,7 +137,7 @@ pub fn draw(ctx: *d.Ctx) void {
         r.x + pad + 26,
         r.y + 16,
         ctx.col(.text),
-        i18n.tr("Compartilhar tela / Go Live 4K", "Share screen / Go Live 4K"),
+        i18n.tr("Compartilhar tela (Discord)", "Share screen (Discord)"),
         @max(w - 38 - ref_w, 60),
     );
 
@@ -150,23 +147,26 @@ pub fn draw(ctx: *d.Ctx) void {
     const win_lbl = std.fmt.bufPrint(&win_lb, "{s} ({d})", .{ i18n.tr("Aplicativo / Janela", "Application / Window"), window_count }) catch i18n.tr("Aplicativo / Janela", "Application / Window");
 
     var y = r.y + 48;
-    y = segRow(ctx, dl, fam, 0x9100, r.x + pad, y, w, i18n.tr("Fonte", "Source"), &.{
-        scr_lbl,
-        win_lbl,
-        i18n.tr("Demo 4K NV12", "4K Demo NV12"),
-    }, &draft.kind_idx);
+    if (allow_demo) {
+        y = segRow(ctx, dl, fam, 0x9100, r.x + pad, y, w, i18n.tr("Fonte", "Source"), &.{
+            scr_lbl,
+            win_lbl,
+            i18n.tr("Demo NV12", "Demo NV12"),
+        }, &draft.kind_idx);
+    } else {
+        if (draft.kind_idx >= 2) draft.kind_idx = 0;
+        y = segRow(ctx, dl, fam, 0x9100, r.x + pad, y, w, i18n.tr("Fonte", "Source"), &.{
+            scr_lbl,
+            win_lbl,
+        }, &draft.kind_idx);
+    }
 
     y = drawTargetRow(ctx, dl, fam, r.x + pad, y, w);
 
-    y = segRow(ctx, dl, fam, 0x9110, r.x + pad, y, w, i18n.tr("Resolução", "Resolution"), &.{ "720p", "1080p", "1440p", "4K" }, &draft.res_idx);
-    y = segRow(ctx, dl, fam, 0x9120, r.x + pad, y, w, i18n.tr("Quadros / Codec / Taxa de bits", "Frame rate / Codec / Bitrate"), &.{ "30 FPS", "60 FPS" }, &draft.fps_idx);
-    y = segRow(ctx, dl, fam, 0x9130, r.x + pad, y - 4, w, null, &.{ "Auto", "H.264", "HEVC", "AV1" }, &draft.codec_idx);
-    y = segRow(ctx, dl, fam, 0x9138, r.x + pad, y - 4, w, null, &.{ i18n.tr("Otomatik", "Auto"), "4 Mbps", "8 Mbps", "15 Mbps", "25 Mbps" }, &draft.bitrate_idx);
-    y = segRow(ctx, dl, fam, 0x9140, r.x + pad, y, w, i18n.tr("Transporte e Controle Remoto", "Transport & Remote Control"), &.{
-        "Discord SFU",
-        i18n.tr("P2P Direto (4K)", "P2P Direct (4K)"),
-    }, &draft.transport_idx);
-    y = segRow(ctx, dl, fam, 0x9150, r.x + pad, y - 4, w, null, &.{
+    y = segRow(ctx, dl, fam, 0x9110, r.x + pad, y, w, i18n.tr("Resolução (Discord)", "Resolution (Discord)"), &.{ "720p", "1080p" }, &draft.res_idx);
+    y = segRow(ctx, dl, fam, 0x9120, r.x + pad, y, w, i18n.tr("Quadros e Taxa de bits", "Frame rate & Bitrate"), &.{ "30 FPS", "60 FPS" }, &draft.fps_idx);
+    y = segRow(ctx, dl, fam, 0x9138, r.x + pad, y - 4, w, null, &.{ i18n.tr("Otomatik", "Auto"), "3 Mbps", "4 Mbps", "6 Mbps", "8 Mbps" }, &draft.bitrate_idx);
+    y = segRow(ctx, dl, fam, 0x9150, r.x + pad, y, w, i18n.tr("Controle Remoto (AnyDesk)", "Remote Control (AnyDesk)"), &.{
         i18n.tr("Sem controle", "No remote ctrl"),
         i18n.tr("Só mouse", "Mouse only"),
         i18n.tr("Mouse + Teclado", "Mouse + Keys"),
@@ -190,15 +190,13 @@ pub fn draw(ctx: *d.Ctx) void {
     var est_b: [192]u8 = undefined;
     const est = i18n.fmt(
         &est_b,
-        "NV12 {d}x{d}: {d:.1} MiB (-62,5% RAM)  •  GPU: {s}{s}{s}",
-        "NV12 {d}x{d}: {d:.1} MiB (-62.5% RAM)  •  GPU: {s}{s}{s}",
+        "Discord H.264 • NV12 {d}x{d}: {d:.1} MiB  •  GPU: {s}",
+        "Discord H.264 • NV12 {d}x{d}: {d:.1} MiB  •  GPU: {s}",
         .{
             dims[0],
             dims[1],
             nv12_mb,
-            if (hw_caps.h264_enc) "H264 " else "",
-            if (hw_caps.hevc_enc) "HEVC " else "",
-            if (hw_caps.av1_enc) "AV1" else if (!hw_caps.h264_enc and !hw_caps.hevc_enc) "SW" else "",
+            if (hw_caps.h264_enc) "H264 HW" else "SW",
         },
     );
     _ = d.textClipped(dl, fam.get(.regular), 12, r.x + pad, y, ctx.col(.muted), est, w);
@@ -217,7 +215,7 @@ pub fn draw(ctx: *d.Ctx) void {
     d.text(dl, fam.get(.medium), 13.5, cr.x + (cr.w - d.width(fam.get(.medium), 13.5, cancel_lbl)) / 2, d.centerY(cr, 13.5), ctx.col(.text), cancel_lbl);
     if (ch.clicked) popup.close(ctx);
 
-    const can_go = draft.kind_idx == 2 or (draft.kind_idx == 0 and display_count > 0) or (draft.kind_idx == 1 and window_count > 0);
+    const can_go = (allow_demo and draft.kind_idx == 2) or (draft.kind_idx == 0 and display_count > 0) or (draft.kind_idx == 1 and window_count > 0);
     qa.mark(go_r, "picker-golive", .{});
     if (forum.primary(ctx, dl, fam, 0x9171, go_r, go_lbl, can_go)) {
         const fps: u8 = if (draft.fps_idx == 1) 60 else 30;
@@ -233,29 +231,27 @@ pub fn draw(ctx: *d.Ctx) void {
         };
         const mbps = idxToMbps(draft.bitrate_idx);
         const bitrate_kbps: u32 = if (mbps > 0) @as(u32, mbps) * 1000 else res.defaultBitrateKbps(fps);
-        const transport = std.enums.fromInt(video_cfg.TransportMode, draft.transport_idx) orelse .discord_sfu;
-        const picked_codec = video_cfg.Codec.fromByte(draft.codec_idx);
         const cfg: video_cfg.StreamConfig = .{
             .kind = kind,
             .target_id = target_id,
-            .resolution = res,
+            .resolution = res.clampDiscord(),
             .fps = fps,
-            .codec = if (transport == .discord_sfu) .h264 else picked_codec,
-            .bitrate_kbps = bitrate_kbps,
+            .codec = .h264,
+            .bitrate_kbps = std.math.clamp(bitrate_kbps, 1000, 8000),
             .share_audio = draft.share_audio,
             .capture_cursor = draft.capture_cursor,
             .preview_self = draft.preview_self,
             .remote_perm = std.enums.fromInt(video_cfg.RemotePerm, draft.remote_idx) orelse .off,
-            .transport = transport,
+            .transport = .discord_sfu,
             .hw_accel = draft.hw_accel,
             .perf_preset = video_cfg.PerfPreset.fromByte(ctx.st.settings.video_perf_preset),
             .capture_backend = video_cfg.CaptureBackend.fromByte(ctx.st.settings.video_cap_mode),
             .static_refresh_ms = video_cfg.staticRefreshMs(ctx.st.settings.video_static_fps),
             .keyframe_sec = ctx.st.settings.video_kf_sec,
         };
-        ctx.st.settings.video_res = draft.res_idx;
+        ctx.st.settings.video_res = @min(draft.res_idx, 1);
         ctx.st.settings.video_fps = draft.fps_idx;
-        ctx.st.settings.video_codec = draft.codec_idx;
+        ctx.st.settings.video_codec = @intFromEnum(video_cfg.Codec.h264);
         ctx.st.settings.video_bitrate_mbps = mbps;
         ctx.st.settings.video_hw = draft.hw_accel;
         ctx.st.settings.video_cursor = draft.capture_cursor;
@@ -269,7 +265,7 @@ pub fn draw(ctx: *d.Ctx) void {
 
 fn drawTargetRow(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, x: f32, y: f32, w: f32) f32 {
     if (draft.kind_idx == 2) {
-        const txt = i18n.tr("Gerador sintético 3840x2160 NV12 local", "Local 3840x2160 NV12 synthetic generator");
+        const txt = i18n.tr("Gerador sintético 1920x1080 NV12 local", "Local 1920x1080 NV12 synthetic generator");
         d.rect(dl, .{ .x = x, .y = y, .w = w, .h = 30 }, ctx.col(.elevated), @max(ctx.th.radius, 6));
         _ = d.textClipped(dl, fam.get(.regular), 12.5, x + 10, y + 8, ctx.col(.muted), txt, w - 20);
         return y + 40;

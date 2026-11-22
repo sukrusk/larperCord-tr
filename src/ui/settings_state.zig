@@ -328,9 +328,9 @@ pub const Settings = struct {
     /// 0 = escuro, 1 = claro, 2 = seguir o sistema.
     color_mode: u8 = 0,
 
-    // Vídeo 4K, transmissão de tela e controle remoto
-    /// 0=720p, 1=1080p, 2=1440p, 3=2160p (4K).
-    video_res: u8 = 3,
+    // Transmissão de tela (Discord 1080p) e controle remoto
+    /// 0=720p, 1=1080p.
+    video_res: u8 = 1,
     /// 0=30fps, 1=60fps.
     video_fps: u8 = 1,
     /// 0=Auto, 1=H.264, 2=HEVC, 3=AV1.

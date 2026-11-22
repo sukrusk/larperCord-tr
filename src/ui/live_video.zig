@@ -290,7 +290,7 @@ pub const Engine = struct {
 
     demo_thread: ?*c.SDL_Thread = null,
     demo_stop: std.atomic.Value(bool) = .init(false),
-    demo_res: video_cfg.Resolution = .p2160,
+    demo_res: video_cfg.Resolution = .p1080,
     demo_fps: u8 = 60,
     demo_source: video_cfg.SourceKind = .demo_4k,
     demo_codec: video_cfg.Codec = .h264,
@@ -627,7 +627,13 @@ pub const Engine = struct {
     }
 
     /// Inicia captura real de monitor (DXGI) ou janela (Windows.Graphics.Capture) em thread dedicada.
-    pub fn startNativeCapture(self: *Engine, cfg: video_cfg.StreamConfig) bool {
+    pub fn startNativeCapture(self: *Engine, cfg_in: video_cfg.StreamConfig) bool {
+        var cfg = cfg_in;
+        cfg.resolution = cfg.resolution.clampDiscord();
+        cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+        cfg.codec = .h264;
+        cfg.transport = .discord_sfu;
+        cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
         self.stopWatch();
         if (self.native_mu == null) self.native_mu = c.SDL_CreateMutex();
         if (self.native_mu) |m| _ = c.SDL_LockMutex(m);
@@ -643,12 +649,18 @@ pub const Engine = struct {
         self.demo_source = cfg.kind;
         self.demo_codec = cfg.codec;
         self.demo_stop.store(false, .release);
-        self.demo_thread = c.SDL_CreateThread(nativeThreadMain, "cap-4k", self);
+        self.demo_thread = c.SDL_CreateThread(nativeThreadMain, "cap-1080", self);
         return self.demo_thread != null;
     }
 
     /// Atualiza resolução, FPS, bitrate, cursor, áudio e monitor/janela sem fechar a thread.
-    pub fn updateNativeCapture(self: *Engine, cfg: video_cfg.StreamConfig) bool {
+    pub fn updateNativeCapture(self: *Engine, cfg_in: video_cfg.StreamConfig) bool {
+        var cfg = cfg_in;
+        cfg.resolution = cfg.resolution.clampDiscord();
+        cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+        cfg.codec = .h264;
+        cfg.transport = .discord_sfu;
+        cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
         if (self.demo_thread == null or !self.native_mode) return self.startNativeCapture(cfg);
         if (self.native_mu == null) self.native_mu = c.SDL_CreateMutex();
         if (self.native_mu) |m| _ = c.SDL_LockMutex(m);

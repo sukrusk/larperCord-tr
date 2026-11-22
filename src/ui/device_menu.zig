@@ -207,7 +207,7 @@ fn drawCamMenu(ctx: *d.Ctx, x: f32, y: f32) void {
 
 fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     const s = &ctx.st.settings;
-    const n_extra: f32 = if (ctx.st.stream_on) 5 else 3;
+    const n_extra: f32 = if (ctx.st.stream_on) 6 else 3;
     const h = pad * 2 + head_h + n_extra * row_h + sep_h + link_h;
     const r = popup.fit(ctx, x, y - h - 6, menu_w, h);
     const dl = popup.beginWindow("##devices", r);
@@ -249,6 +249,15 @@ fn drawShareMenu(ctx: *d.Ctx, x: f32, y: f32) void {
     yy += row_h;
 
     if (ctx.st.stream_on) {
+        if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x546, i18n.tr("Configurações da transmissão", "Live Stream Settings"), ctx.st.stream_settings_open, false)) {
+            s.video_self_preview = true;
+            if (ctx.st.watch_owner != ctx.store.me) ctx.act(.{ .watch_stream = ctx.store.me });
+            ctx.st.stream_settings_open = true;
+            popup.close(ctx);
+            return;
+        }
+        yy += row_h;
+
         const self_shown = ctx.st.watch_owner == ctx.store.me and s.video_self_preview;
         if (quickMenuRow(ctx, dl, .{ .x = r.x + pad, .y = yy, .w = r.w - pad * 2, .h = row_h - 2 }, base_id + 0x542, i18n.tr("Kendi ön izlemem", "Self preview on stage"), self_shown, false)) {
             if (self_shown) {

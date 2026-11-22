@@ -2,7 +2,7 @@
 //! comparar versões, ler o SHA256SUMS e conferir a assinatura dele.
 const std = @import("std");
 
-pub const number = "0.8.3";
+pub const number = "0.8.4";
 
 /// Opção de chave pública Ed25519 para lançamentos assinados; vazio usa
 /// verificação SHA-256 sobre HTTPS a partir dos lançamentos oficiais no GitHub.

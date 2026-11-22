@@ -1536,14 +1536,20 @@ pub const App = struct {
         } else app.st.showToast(now(), true, "{s}", "{s}", .{app.themes.last_error orelse i18n.tr("erro no tema", "theme error")});
     }
 
-    fn applyLiveStreamCfg(app: *App, cfg: video_cfg.StreamConfig) void {
+    fn applyLiveStreamCfg(app: *App, cfg_in: video_cfg.StreamConfig) void {
         const st = &app.st;
+        var cfg = cfg_in;
+        cfg.resolution = cfg.resolution.clampDiscord();
+        cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+        cfg.codec = .h264;
+        cfg.transport = .discord_sfu;
+        cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
         st.stream_cfg = cfg;
-        st.settings.video_res = @intFromEnum(cfg.resolution);
+        st.settings.video_res = @min(@intFromEnum(cfg.resolution), 1);
         st.settings.video_fps = if (cfg.fps >= 55) 1 else 0;
         st.settings.video_codec = @intFromEnum(cfg.codec);
         const mbps_raw: u32 = cfg.bitrate_kbps / 1000;
-        st.settings.video_bitrate_mbps = if (cfg.bitrate_kbps == cfg.resolution.defaultBitrateKbps(cfg.fps)) 0 else @intCast(std.math.clamp(mbps_raw, 1, 50));
+        st.settings.video_bitrate_mbps = if (cfg.bitrate_kbps == cfg.resolution.defaultBitrateKbps(cfg.fps)) 0 else @intCast(std.math.clamp(mbps_raw, 1, 8));
         st.settings.video_hw = cfg.hw_accel;
         st.settings.video_cursor = cfg.capture_cursor;
         st.settings.video_self_preview = cfg.preview_self;
@@ -2423,9 +2429,17 @@ pub const App = struct {
                 if (st.voice == null) return;
                 st.popup = .stream_picker;
             },
-            .start_screen_share => |cfg| {
+            .start_screen_share => |cfg_in| {
                 const ch = st.voice orelse return;
-                if (st.stream_on and cfg.transport == st.stream_cfg.transport and !app.store.demo and cfg.kind != .demo_4k and (st.stream_cfg.kind == .screen or st.stream_cfg.kind == .window)) {
+                var cfg = cfg_in;
+                if (!app.store.demo and cfg.kind != .demo_4k) {
+                    cfg.resolution = cfg.resolution.clampDiscord();
+                    cfg.fps = std.math.clamp(cfg.fps, 15, 60);
+                    cfg.codec = .h264;
+                    cfg.transport = .discord_sfu;
+                    cfg.bitrate_kbps = std.math.clamp(cfg.bitrate_kbps, 1000, 8000);
+                }
+                if (st.stream_on and !app.store.demo and cfg.kind != .demo_4k and (st.stream_cfg.kind == .screen or st.stream_cfg.kind == .window)) {
                     app.applyLiveStreamCfg(cfg);
                     return;
                 }
@@ -3949,12 +3963,12 @@ pub const App = struct {
                     if (nd > 0) {
                         const chosen = @min(@as(usize, disp_idx), nd - 1);
                         var ncfg = live_video.eng.native_cfg;
-                        if (ncfg.resolution == .p2160 and !app.st.stream_on) {
+                        if (!app.st.stream_on) {
                             ncfg.resolution = video_cfg.Resolution.fromByte(app.st.settings.video_res);
                             ncfg.fps = if (app.st.settings.video_fps == 1) 60 else 30;
                             ncfg.capture_cursor = app.st.settings.video_cursor;
                             ncfg.hw_accel = app.st.settings.video_hw;
-                            ncfg.transport = .p2p_direct;
+                            ncfg.transport = .discord_sfu;
                         }
                         ncfg.kind = .screen;
                         ncfg.target_id = disps[chosen].id;
